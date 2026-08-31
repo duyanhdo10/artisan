@@ -28,9 +28,21 @@ For the Windows spike, Astian uses option 3 for existing notes:
 
 `ReplaceFileW` is called without flags that ignore ACL/metadata merge errors. If recovery cannot be proven after a platform error, Astian reports failure and retains the recovery artifact rather than guessing or deleting the last known-good bytes.
 
+Safe creation is now a separate primitive for recovery `Save As Copy`:
+
+1. The user chooses a Markdown filename, but Rust canonicalizes its existing
+   parent and rejects destinations outside the active vault.
+2. Normalized UTF-8/LF content is written to a unique sibling temporary file,
+   flushed, and synced.
+3. A hard link installs that inode at the destination with create/no-clobber
+   semantics. An existing or concurrently created destination is never
+   overwritten, even if the platform dialog offered overwrite confirmation.
+4. Rust reads and verifies the created bytes before returning the opened copy.
+
 ## Consequences
 
-- Saves remain limited to existing Markdown files during this spike; safe creation is a separate operation.
+- Existing-note save and no-clobber copy creation remain separate operations;
+  ordinary new-note creation is still outside this spike.
 - A very small check-to-replace race with unrelated processes still exists because Windows has no file-content compare-and-swap primitive. Rechecking before each attempt narrows the window, and watcher reconciliation remains required.
 - A crash between replacement and cleanup can leave a non-Markdown `.astian-backup-*` recovery file beside the note. A later recovery journal/cleanup design must move durable recovery state outside the vault before Version 0.1 is complete.
 - Network, removable, OneDrive, and unusual filesystems remain best-effort until failure-injection tests establish their behavior.

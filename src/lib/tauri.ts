@@ -117,3 +117,13 @@ export function readRecoveryDraft(relativePath: string): Promise<RecoveryDraft> 
 export function clearRecoveryDraft(relativePath: string): Promise<void> {
   return invoke<void>("clear_recovery_draft", { relativePath });
 }
+
+export function saveNoteAsCopy(
+  sourceRelativePath: string,
+  content: string,
+): Promise<OpenedNote | null> {
+  return invoke<OpenedNote | null>("save_note_as_copy", {
+    sourceRelativePath,
+    content,
+  });
+}

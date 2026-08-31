@@ -6,6 +6,7 @@ import {
   normalizeCommandError,
   readRecoveryDraft,
   saveNote,
+  saveNoteAsCopy,
   writeRecoveryDraft,
 } from "./tauri";
 
@@ -111,6 +112,18 @@ describe("recovery draft IPC", () => {
     });
     expect(invoke).toHaveBeenNthCalledWith(2, "clear_recovery_draft", {
       relativePath: "notes/Astian.md",
+    });
+  });
+
+  it("sends recovery content to Save As Copy without an absolute path", async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    await expect(
+      saveNoteAsCopy("notes/missing.md", "# Recovered\n"),
+    ).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("save_note_as_copy", {
+      sourceRelativePath: "notes/missing.md",
+      content: "# Recovered\n",
     });
   });
 });

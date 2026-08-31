@@ -287,6 +287,50 @@ async fn clear_recovery_draft(
     .map_err(|_| CommandError::internal())?
 }
 
+#[tauri::command]
+async fn save_note_as_copy(
+    app: tauri::AppHandle,
+    source_relative_path: String,
+    content: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<Option<OpenedNote>, CommandError> {
+    let root = current_vault_root(&state)?;
+    let suggested_name = suggested_recovery_copy_name(&source_relative_path)?;
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_directory(&root)
+        .set_file_name(suggested_name)
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let selected_path = selected.into_path().map_err(|_| {
+        CommandError::new(
+            "unsupported_copy_path",
+            "The selected copy path is not supported on this platform.",
+        )
+    })?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        let copied = create_markdown_copy_and_cleanup(&root, &selected_path, &content, || {
+            recovery::clear_recovery_draft_if_content_matches(
+                &app_local_data_root,
+                &root,
+                &source_relative_path,
+                &content,
+            )
+        })?;
+        Ok(Some(copied))
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
 fn current_vault_root(state: &VaultState) -> Result<PathBuf, CommandError> {
     state
         .root
@@ -324,6 +368,180 @@ fn validate_relative_note_path(relative_path: &str) -> Result<PathBuf, CommandEr
     }
 
     Ok(path.to_path_buf())
+}
+
+fn suggested_recovery_copy_name(relative_path: &str) -> Result<String, CommandError> {
+    let relative = validate_relative_note_path(relative_path)?;
+    let stem = relative
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            CommandError::new(
+                "unsupported_copy_path",
+                "The recovery note name is not supported on this platform.",
+            )
+        })?;
+    Ok(format!("{stem}-recovered.md"))
+}
+
+fn create_markdown_copy(
+    root: &Path,
+    selected_path: &Path,
+    content: &str,
+) -> Result<OpenedNote, CommandError> {
+    create_markdown_copy_with(root, selected_path, content, |source, target| {
+        fs::hard_link(source, target)
+    })
+}
+
+fn create_markdown_copy_and_cleanup<F>(
+    root: &Path,
+    selected_path: &Path,
+    content: &str,
+    cleanup_recovery: F,
+) -> Result<OpenedNote, CommandError>
+where
+    F: FnOnce() -> Result<(), CommandError>,
+{
+    let copied = create_markdown_copy(root, selected_path, content)?;
+    let _ = cleanup_recovery();
+    Ok(copied)
+}
+
+fn create_markdown_copy_with<F>(
+    root: &Path,
+    selected_path: &Path,
+    content: &str,
+    install_copy: F,
+) -> Result<OpenedNote, CommandError>
+where
+    F: Fn(&Path, &Path) -> io::Result<()>,
+{
+    let file_name = selected_path.file_name().ok_or_else(|| {
+        CommandError::new(
+            "invalid_copy_path",
+            "Choose a Markdown filename inside the current vault.",
+        )
+    })?;
+    let is_markdown = selected_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+    if !is_markdown {
+        return Err(CommandError::new(
+            "invalid_copy_path",
+            "The recovery copy must use a Markdown filename.",
+        ));
+    }
+
+    let parent = selected_path.parent().ok_or_else(|| {
+        CommandError::new(
+            "invalid_copy_path",
+            "Choose a Markdown filename inside the current vault.",
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+        CommandError::new(
+            "copy_parent_unavailable",
+            "The selected recovery copy folder is unavailable.",
+        )
+    })?;
+    if !canonical_parent.starts_with(root) {
+        return Err(CommandError::new(
+            "copy_outside_vault",
+            "The recovery copy must stay inside the current vault.",
+        ));
+    }
+
+    let target = canonical_parent.join(file_name);
+    if target.try_exists().map_err(|_| {
+        CommandError::new(
+            "copy_target_unavailable",
+            "The recovery copy destination could not be inspected.",
+        )
+    })? {
+        return Err(CommandError::new(
+            "copy_already_exists",
+            "Astian will not overwrite an existing file. Choose a new name.",
+        ));
+    }
+
+    let relative = target.strip_prefix(root).map_err(|_| {
+        CommandError::new(
+            "copy_outside_vault",
+            "The recovery copy must stay inside the current vault.",
+        )
+    })?;
+    let relative_path = relative
+        .to_str()
+        .ok_or_else(|| {
+            CommandError::new(
+                "unsupported_copy_path",
+                "The selected copy path cannot be represented safely.",
+            )
+        })?
+        .replace('\\', "/");
+    validate_relative_note_path(&relative_path)?;
+
+    let normalized_content = content.replace("\r\n", "\n").replace('\r', "\n");
+    let expected_bytes = normalized_content.as_bytes();
+    let mut temporary = TempFileBuilder::new()
+        .prefix(".astian-copy-")
+        .suffix(".tmp")
+        .tempfile_in(&canonical_parent)
+        .map_err(|_| {
+            CommandError::new(
+                "copy_prepare_failed",
+                "The recovery copy could not be prepared.",
+            )
+        })?;
+    temporary
+        .write_all(expected_bytes)
+        .and_then(|_| temporary.flush())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| {
+            CommandError::new(
+                "copy_write_failed",
+                "The recovery copy could not be written safely.",
+            )
+        })?;
+    let (temporary_file, temporary_path) = temporary.keep().map_err(|_| {
+        CommandError::new(
+            "copy_prepare_failed",
+            "The recovery copy could not be prepared.",
+        )
+    })?;
+    drop(temporary_file);
+    let _temporary_cleanup = CleanupPath(temporary_path.clone());
+
+    install_copy(&temporary_path, &target).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            CommandError::new(
+                "copy_already_exists",
+                "Astian will not overwrite an existing file. Choose a new name.",
+            )
+        } else {
+            CommandError::new(
+                "copy_install_failed",
+                "The recovery copy could not be installed safely.",
+            )
+        }
+    })?;
+
+    let copied_bytes = fs::read(&target).map_err(|_| {
+        CommandError::new(
+            "copy_verification_failed",
+            "Astian could not verify the recovery copy.",
+        )
+    })?;
+    if copied_bytes != expected_bytes {
+        return Err(CommandError::new(
+            "copy_verification_failed",
+            "Astian could not verify the recovery copy.",
+        ));
+    }
+
+    read_markdown_note(root, &relative_path)
 }
 
 fn read_markdown_note(root: &Path, relative_path: &str) -> Result<OpenedNote, CommandError> {
@@ -816,7 +1034,8 @@ pub fn run() {
             write_recovery_draft,
             list_recovery_drafts,
             read_recovery_draft,
-            clear_recovery_draft
+            clear_recovery_draft,
+            save_note_as_copy
         ])
         .run(tauri::generate_context!());
 
@@ -1042,6 +1261,97 @@ mod tests {
             fs::read(root.join("note.md")).expect("saved note should read"),
             b"changed\n"
         );
+    }
+
+    #[test]
+    fn recovery_copy_is_created_no_clobber_and_normalizes_line_endings() {
+        let (_temp, root) = canonical_temp_root();
+        let target = root.join("Bản phục hồi.md");
+
+        let copied = create_markdown_copy(&root, &target, "first\r\nsecond\r")
+            .expect("recovery copy should be created");
+
+        assert_eq!(copied.relative_path, "Bản phục hồi.md");
+        assert_eq!(copied.content, "first\nsecond\n");
+        assert_eq!(
+            fs::read(&target).expect("copy should read"),
+            b"first\nsecond\n"
+        );
+        assert!(internal_artifacts(&root).is_empty());
+        assert_eq!(
+            suggested_recovery_copy_name("Dự án/Kế hoạch.md")
+                .expect("suggested name should be generated"),
+            "Kế hoạch-recovered.md"
+        );
+    }
+
+    #[test]
+    fn recovery_copy_refuses_existing_and_outside_vault_targets() {
+        let (temp, root) = canonical_temp_root();
+        let existing = root.join("existing.md");
+        fs::write(&existing, b"external").expect("existing fixture should write");
+        let install_called = Cell::new(false);
+
+        let existing_error = create_markdown_copy_with(&root, &existing, "recovery", |_, _| {
+            install_called.set(true);
+            Ok(())
+        })
+        .expect_err("existing target should be refused");
+        let outside = temp.path().parent().expect("temp should have a parent");
+        let outside_error =
+            create_markdown_copy(&root, &outside.join("outside-recovery.md"), "recovery")
+                .expect_err("outside target should be refused");
+
+        assert_eq!(existing_error.code, "copy_already_exists");
+        assert_eq!(outside_error.code, "copy_outside_vault");
+        assert!(!install_called.get());
+        assert_eq!(
+            fs::read(existing).expect("existing should read"),
+            b"external"
+        );
+        assert!(internal_artifacts(&root).is_empty());
+    }
+
+    #[test]
+    fn recovery_copy_install_race_preserves_external_file_and_cleans_temp() {
+        let (_temp, root) = canonical_temp_root();
+        let target = root.join("race.md");
+
+        let error = create_markdown_copy_with(&root, &target, "recovery", |_, target| {
+            fs::write(target, b"external")?;
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "injected create race",
+            ))
+        })
+        .expect_err("raced target should not be overwritten");
+
+        assert_eq!(error.code, "copy_already_exists");
+        assert_eq!(
+            fs::read(&target).expect("external target should read"),
+            b"external"
+        );
+        assert!(internal_artifacts(&root).is_empty());
+    }
+
+    #[test]
+    fn recovery_copy_cleanup_failure_does_not_fail_a_verified_copy() {
+        let (_temp, root) = canonical_temp_root();
+        let target = root.join("verified-copy.md");
+        let cleanup_called = Cell::new(false);
+
+        let copied = create_markdown_copy_and_cleanup(&root, &target, "recovered", || {
+            cleanup_called.set(true);
+            Err(CommandError::new(
+                "recovery_cleanup_failed",
+                "injected cleanup failure",
+            ))
+        })
+        .expect("verified copy should remain successful");
+
+        assert_eq!(copied.content, "recovered");
+        assert!(cleanup_called.get());
+        assert_eq!(fs::read(target).expect("copy should read"), b"recovered");
     }
 
     #[test]

@@ -13,6 +13,7 @@ import {
   openNote,
   readRecoveryDraft,
   saveNote,
+  saveNoteAsCopy,
   selectVault,
   writeRecoveryDraft,
   type OpenedNote,
@@ -252,6 +253,51 @@ function App() {
       setRecoveryDrafts((current) =>
         current.filter((draftSummary) => draftSummary.relativePath !== summary.relativePath),
       );
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveAsCopy(summary?: RecoveryDraftSummary) {
+    if (busy || (summary !== undefined && isDirty)) return;
+
+    const sourceRelativePath = summary?.relativePath ?? activeNote?.relativePath;
+    if (!sourceRelativePath) return;
+
+    setBusy(true);
+    setOperationError(null);
+    try {
+      const contentToCopy = summary
+        ? (await readRecoveryDraft(summary.relativePath)).content
+        : draft;
+      const copied = await saveNoteAsCopy(sourceRelativePath, contentToCopy);
+      if (!copied) return;
+
+      setActiveNote(copied);
+      setDraft(copied.content);
+      setEditorRevision(0);
+      setSaveState("idle");
+      setRecoveryState("idle");
+      expectedRecoveryHashRef.current = null;
+      setRecoveryDrafts((current) =>
+        current.filter(
+          (draftSummary) => draftSummary.relativePath !== sourceRelativePath,
+        ),
+      );
+      setVault((current) => {
+        if (!current) return current;
+        const fileName = copied.relativePath.split("/").pop();
+        const title = fileName?.replace(/\.md$/i, "") ?? copied.relativePath;
+        return {
+          ...current,
+          notes: [...current.notes, { relativePath: copied.relativePath, title }]
+            .sort((left, right) =>
+              left.relativePath.localeCompare(right.relativePath),
+            ),
+        };
+      });
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -522,10 +568,20 @@ function App() {
                   {recoveryLabel}
                 </span>
               ) : null}
-              {saveState === "conflict" ? (
-                <button className="secondary-action" type="button" onClick={handleReload}>
-                  Reload disk version
+              {saveState === "conflict" || saveState === "failed" ? (
+                <button
+                  className="secondary-action"
+                  type="button"
+                  onClick={() => handleSaveAsCopy()}
+                  disabled={busy}
+                >
+                  Save As Copy
                 </button>
+              ) : null}
+              {saveState === "conflict" ? (
+                  <button className="secondary-action" type="button" onClick={handleReload}>
+                    Reload disk version
+                  </button>
               ) : null}
               <button
                 className="save-action"
@@ -554,6 +610,13 @@ function App() {
                     disabled={busy || isDirty}
                   >
                     Restore
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAsCopy(summary)}
+                    disabled={busy || isDirty}
+                  >
+                    Save As Copy
                   </button>
                   <button
                     className="discard-recovery"
