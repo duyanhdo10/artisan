@@ -2,6 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
+  MarkdownEditor,
+  type MarkdownEditorMode,
+} from "./editor/MarkdownEditor";
+import {
   getRuntimeInfo,
   normalizeCommandError,
   openNote,
@@ -23,6 +27,8 @@ function App() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [editorMode, setEditorMode] =
+    useState<MarkdownEditorMode>("live-preview");
   const isDirty = activeNote !== null && draft !== activeNote.content;
 
   useEffect(() => {
@@ -298,9 +304,26 @@ function App() {
           <div className="window-drag-region" data-tauri-drag-region />
         </header>
 
-        <section className="editor-pane" aria-label="Markdown source editor spike">
+        <section className="editor-pane" aria-label="Markdown editor spike">
           <div className="editor-toolbar">
-            <span>Source spike</span>
+            <div className="editor-mode" aria-label="Editor mode">
+              <button
+                className={editorMode === "live-preview" ? "active" : ""}
+                type="button"
+                aria-pressed={editorMode === "live-preview"}
+                onClick={() => setEditorMode("live-preview")}
+              >
+                Live Preview
+              </button>
+              <button
+                className={editorMode === "source" ? "active" : ""}
+                type="button"
+                aria-pressed={editorMode === "source"}
+                onClick={() => setEditorMode("source")}
+              >
+                Source
+              </button>
+            </div>
             <div className="save-controls">
               <span
                 className={
@@ -332,15 +355,14 @@ function App() {
             </div>
           </div>
           {operationError ? <div className="error-banner" role="alert">{operationError}</div> : null}
-          <textarea
-            aria-label="Markdown source"
-            className="source-editor"
+          <MarkdownEditor
+            key={activeNote?.relativePath ?? "no-note"}
+            ariaLabel="Markdown source"
             value={draft}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            placeholder="Select a Markdown note from the file list."
+            onChange={setDraft}
+            mode={editorMode}
             disabled={activeNote === null}
             readOnly={isMixedLineEnding}
-            spellCheck="true"
           />
         </section>
       </main>
