@@ -45,6 +45,10 @@ layout is:
   write coordinator.
 - A dirty editor revision is not considered recovery-protected until the Rust
   command confirms the durable draft write.
+- Creating a draft uses no-clobber semantics. Replacing one requires the caller
+  to provide its last confirmed `content_hash`; a missing or mismatched hash
+  refuses the write so an unreviewed draft from an earlier session cannot be
+  overwritten by a new editing session.
 - A draft is removed only after the target note save has been read back and
   hash-verified, or after an explicit user action discards that draft.
 - Cleanup failure does not turn a verified note save into a failed save. The

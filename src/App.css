@@ -196,6 +196,7 @@ small,
 .dirty-dot { color: #21a5a3; font-size: 7px; }
 .window-drag-region { flex: 1; }
 .editor-pane { position: relative; display: grid; min-height: 0; grid-template-rows: 38px 1fr; }
+.editor-pane.has-recovery { grid-template-rows: 38px auto 1fr; }
 
 .editor-toolbar {
   display: flex;
@@ -300,6 +301,44 @@ small,
 .markdown-editor .cm-placeholder { color: #667b7d; font-style: normal; }
 .markdown-editor .cm-content[contenteditable="false"] { color: #94a7a8; }
 .save-state.warning { color: #d6a95d; }
+
+.recovery-banner {
+  display: grid;
+  gap: 7px;
+  border-bottom: 1px solid #80632f;
+  padding: 10px 20px;
+  color: #ead6ad;
+  background: #302919;
+  font-size: 11px;
+}
+
+.recovery-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.recovery-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-item button {
+  border: 1px solid #80632f;
+  border-radius: 4px;
+  padding: 3px 8px;
+  color: #ead6ad;
+  background: #3b321f;
+  font-size: 10px;
+}
+
+.recovery-item .discard-recovery {
+  color: #f0c6c6;
+  border-color: #754b4b;
+  background: #3a2426;
+}
 
 .error-banner {
   position: absolute;

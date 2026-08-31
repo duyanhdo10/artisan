@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import {
@@ -6,17 +6,25 @@ import {
   type MarkdownEditorMode,
 } from "./editor/MarkdownEditor";
 import {
+  clearRecoveryDraft,
   getRuntimeInfo,
+  listRecoveryDrafts,
   normalizeCommandError,
   openNote,
+  readRecoveryDraft,
   saveNote,
   selectVault,
+  writeRecoveryDraft,
   type OpenedNote,
+  type RecoveryDraftSummary,
   type RuntimeInfo,
   type VaultSummary,
 } from "./lib/tauri";
 
 type SaveState = "idle" | "saving" | "failed" | "conflict";
+type RecoveryState = "idle" | "pending" | "writing" | "protected" | "failed";
+
+const RECOVERY_DEBOUNCE_MS = 600;
 
 function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
@@ -27,8 +35,13 @@ function App() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
+  const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryDraftSummary[]>([]);
+  const [editorRevision, setEditorRevision] = useState(0);
   const [editorMode, setEditorMode] =
     useState<MarkdownEditorMode>("live-preview");
+  const recoveryWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const expectedRecoveryHashRef = useRef<string | null>(null);
   const isDirty = activeNote !== null && draft !== activeNote.content;
 
   useEffect(() => {
@@ -63,6 +76,12 @@ function App() {
         setActiveNote(null);
         setDraft("");
         setSaveState("idle");
+        setRecoveryState("idle");
+        setRecoveryDrafts([]);
+        setEditorRevision(0);
+        expectedRecoveryHashRef.current = null;
+        const pendingRecoveryDrafts = await listRecoveryDrafts();
+        setRecoveryDrafts(pendingRecoveryDrafts);
       }
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
@@ -77,6 +96,12 @@ function App() {
       setOperationError("Save or reload the modified note before opening another note.");
       return;
     }
+    if (recoveryDrafts.some((recovery) => recovery.relativePath === relativePath)) {
+      setOperationError(
+        "Restore or discard this note's recovery draft before opening it.",
+      );
+      return;
+    }
 
     setBusy(true);
     setOperationError(null);
@@ -86,6 +111,9 @@ function App() {
       setActiveNote(note);
       setDraft(note.content);
       setSaveState("idle");
+      setRecoveryState("idle");
+      setEditorRevision(0);
+      expectedRecoveryHashRef.current = null;
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -121,6 +149,11 @@ function App() {
           : current,
       );
       setSaveState("idle");
+      setRecoveryState("idle");
+      setRecoveryDrafts((current) =>
+        current.filter((recovery) => recovery.relativePath !== notePath),
+      );
+      expectedRecoveryHashRef.current = null;
     } catch (error: unknown) {
       const commandError = normalizeCommandError(error);
       setSaveState(
@@ -136,10 +169,16 @@ function App() {
     setBusy(true);
     setOperationError(null);
     try {
+      if (expectedRecoveryHashRef.current !== null) {
+        await clearRecoveryDraft(activeNote.relativePath);
+      }
       const note = await openNote(activeNote.relativePath);
       setActiveNote(note);
       setDraft(note.content);
       setSaveState("idle");
+      setRecoveryState("idle");
+      setEditorRevision(0);
+      expectedRecoveryHashRef.current = null;
     } catch (error: unknown) {
       setSaveState("failed");
       setOperationError(normalizeCommandError(error).message);
@@ -159,6 +198,122 @@ function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleSave]);
+
+  async function handleRestoreRecovery(summary: RecoveryDraftSummary) {
+    if (busy || isDirty) return;
+
+    setBusy(true);
+    setOperationError(null);
+    try {
+      const [note, recovery] = await Promise.all([
+        openNote(summary.relativePath),
+        readRecoveryDraft(summary.relativePath),
+      ]);
+      setActiveNote(note);
+      setDraft(recovery.content);
+      setEditorRevision(recovery.editorRevision);
+      if (note.content === recovery.content) {
+        await clearRecoveryDraft(summary.relativePath);
+        expectedRecoveryHashRef.current = null;
+        setRecoveryState("idle");
+        setSaveState("idle");
+        setRecoveryDrafts((current) =>
+          current.filter((draftSummary) => draftSummary.relativePath !== summary.relativePath),
+        );
+        return;
+      }
+      expectedRecoveryHashRef.current = recovery.contentHash;
+      setRecoveryState("protected");
+      setSaveState(
+        note.contentHash === recovery.baseHash ? "idle" : "conflict",
+      );
+      setRecoveryDrafts((current) =>
+        current.filter((draftSummary) => draftSummary.relativePath !== summary.relativePath),
+      );
+      if (note.contentHash !== recovery.baseHash) {
+        setOperationError(
+          "The disk note changed after this recovery draft. Save As Copy is required before replacing either version.",
+        );
+      }
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDiscardRecovery(summary: RecoveryDraftSummary) {
+    if (busy || isDirty) return;
+
+    setBusy(true);
+    setOperationError(null);
+    try {
+      await clearRecoveryDraft(summary.relativePath);
+      setRecoveryDrafts((current) =>
+        current.filter((draftSummary) => draftSummary.relativePath !== summary.relativePath),
+      );
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!activeNote || !isDirty || activeNote.lineEnding === "mixed") {
+      setRecoveryState("idle");
+      return;
+    }
+
+    let cancelled = false;
+    const notePath = activeNote.relativePath;
+    const contentToProtect = draft;
+    const baseHash = activeNote.contentHash;
+    const revisionToProtect = editorRevision;
+    setRecoveryState("pending");
+
+    const timer = window.setTimeout(() => {
+      if (!cancelled) setRecoveryState("writing");
+
+      const write = recoveryWriteQueueRef.current
+        .catch(() => undefined)
+        .then(() =>
+          writeRecoveryDraft(
+            notePath,
+            contentToProtect,
+            baseHash,
+            revisionToProtect,
+            expectedRecoveryHashRef.current,
+          ),
+        );
+      recoveryWriteQueueRef.current = write.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      write
+        .then((summary) => {
+          expectedRecoveryHashRef.current = summary.contentHash;
+          if (!cancelled && summary.editorRevision === revisionToProtect) {
+            setRecoveryState("protected");
+          }
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const commandError = normalizeCommandError(error);
+          setRecoveryState("failed");
+          if (commandError.code === "recovery_base_changed") {
+            setSaveState("conflict");
+          }
+          setOperationError(commandError.message);
+        });
+    }, RECOVERY_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeNote, draft, editorRevision, isDirty]);
 
   useEffect(() => {
     let disposed = false;
@@ -204,6 +359,21 @@ function App() {
                 ? "Modified"
                 : `Saved · ${activeNote.contentHash.slice(0, 8)}`
             : "Open a note to start";
+  const recoveryLabel =
+    recoveryState === "pending"
+      ? "Recovery pending"
+      : recoveryState === "writing"
+        ? "Protecting draft…"
+        : recoveryState === "protected"
+          ? "Draft protected"
+          : recoveryState === "failed"
+            ? "Recovery failed"
+            : null;
+
+  const handleDraftChange = useCallback((value: string) => {
+    setDraft(value);
+    setEditorRevision((revision) => revision + 1);
+  }, []);
 
   return (
     <div className="app-shell">
@@ -304,7 +474,14 @@ function App() {
           <div className="window-drag-region" data-tauri-drag-region />
         </header>
 
-        <section className="editor-pane" aria-label="Markdown editor spike">
+        <section
+          className={
+            recoveryDrafts.length > 0
+              ? "editor-pane has-recovery"
+              : "editor-pane"
+          }
+          aria-label="Markdown editor spike"
+        >
           <div className="editor-toolbar">
             <div className="editor-mode" aria-label="Editor mode">
               <button
@@ -334,6 +511,17 @@ function App() {
               >
                 {saveLabel}
               </span>
+              {recoveryLabel ? (
+                <span
+                  className={
+                    recoveryState === "failed"
+                      ? "save-state warning"
+                      : "save-state"
+                  }
+                >
+                  {recoveryLabel}
+                </span>
+              ) : null}
               {saveState === "conflict" ? (
                 <button className="secondary-action" type="button" onClick={handleReload}>
                   Reload disk version
@@ -354,12 +542,37 @@ function App() {
               </button>
             </div>
           </div>
+          {recoveryDrafts.length > 0 ? (
+            <div className="recovery-banner" role="status">
+              <strong>Unsaved recovery drafts found</strong>
+              {recoveryDrafts.map((summary) => (
+                <div className="recovery-item" key={summary.relativePath}>
+                  <span>{summary.relativePath}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRestoreRecovery(summary)}
+                    disabled={busy || isDirty}
+                  >
+                    Restore
+                  </button>
+                  <button
+                    className="discard-recovery"
+                    type="button"
+                    onClick={() => handleDiscardRecovery(summary)}
+                    disabled={busy || isDirty}
+                  >
+                    Discard
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {operationError ? <div className="error-banner" role="alert">{operationError}</div> : null}
           <MarkdownEditor
             key={activeNote?.relativePath ?? "no-note"}
             ariaLabel="Markdown source"
             value={draft}
-            onChange={setDraft}
+            onChange={handleDraftChange}
             mode={editorMode}
             disabled={activeNote === null}
             readOnly={isMixedLineEnding}

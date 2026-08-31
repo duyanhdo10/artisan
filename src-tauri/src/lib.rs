@@ -1,3 +1,6 @@
+mod recovery;
+
+use recovery::{RecoveryDraft, RecoveryDraftSummary};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,6 +12,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use tempfile::Builder as TempFileBuilder;
 
@@ -170,6 +174,7 @@ fn open_note(
 
 #[tauri::command]
 async fn save_note(
+    app: tauri::AppHandle,
     relative_path: String,
     content: String,
     expected_hash: String,
@@ -181,14 +186,123 @@ async fn save_note(
         .map_err(|_| CommandError::internal())?
         .clone()
         .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))?;
+    let app_local_data_root = app_local_data_root(&app)?;
     let write_lock = Arc::clone(&state.write_lock);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
-        save_markdown_note(&root, &relative_path, &content, &expected_hash)
+        save_markdown_note_and_cleanup(&root, &relative_path, &content, &expected_hash, || {
+            recovery::clear_recovery_draft_if_content_matches(
+                &app_local_data_root,
+                &root,
+                &relative_path,
+                &content,
+            )
+        })
     })
     .await
     .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn write_recovery_draft(
+    app: tauri::AppHandle,
+    relative_path: String,
+    content: String,
+    base_hash: String,
+    editor_revision: u64,
+    expected_draft_hash: Option<String>,
+    state: tauri::State<'_, VaultState>,
+) -> Result<RecoveryDraftSummary, CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::write_recovery_draft(
+            &app_local_data_root,
+            &root,
+            &relative_path,
+            &content,
+            &base_hash,
+            editor_revision,
+            expected_draft_hash.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn list_recovery_drafts(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VaultState>,
+) -> Result<Vec<RecoveryDraftSummary>, CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::list_recovery_drafts(&app_local_data_root, &root)
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn read_recovery_draft(
+    app: tauri::AppHandle,
+    relative_path: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<RecoveryDraft, CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::read_recovery_draft(&app_local_data_root, &root, &relative_path)
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn clear_recovery_draft(
+    app: tauri::AppHandle,
+    relative_path: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<(), CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::clear_recovery_draft(&app_local_data_root, &root, &relative_path)
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+fn current_vault_root(state: &VaultState) -> Result<PathBuf, CommandError> {
+    state
+        .root
+        .lock()
+        .map_err(|_| CommandError::internal())?
+        .clone()
+        .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))
+}
+
+fn app_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    app.path().app_local_data_dir().map_err(|_| {
+        CommandError::new(
+            "recovery_location_unavailable",
+            "The recovery draft location is unavailable.",
+        )
+    })
 }
 
 fn validate_relative_note_path(relative_path: &str) -> Result<PathBuf, CommandError> {
@@ -258,6 +372,16 @@ impl Drop for CleanupPath {
 
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_content_hash(content_hash: &str) -> Result<(), CommandError> {
+    if content_hash.len() != 64 || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CommandError::new(
+            "invalid_content_hash",
+            "The request did not contain a valid content hash.",
+        ));
+    }
+    Ok(())
 }
 
 fn decode_markdown(bytes: &[u8]) -> Result<DecodedMarkdown, CommandError> {
@@ -348,6 +472,21 @@ fn save_markdown_note(
     )
 }
 
+fn save_markdown_note_and_cleanup<F>(
+    root: &Path,
+    relative_path: &str,
+    content: &str,
+    expected_hash: &str,
+    cleanup_recovery: F,
+) -> Result<SaveResult, CommandError>
+where
+    F: FnOnce() -> Result<(), CommandError>,
+{
+    let result = save_markdown_note(root, relative_path, content, expected_hash)?;
+    let _ = cleanup_recovery();
+    Ok(result)
+}
+
 fn save_markdown_note_with<F>(
     root: &Path,
     relative_path: &str,
@@ -358,12 +497,7 @@ fn save_markdown_note_with<F>(
 where
     F: Fn(&Path, &Path) -> io::Result<ReplacementReceipt>,
 {
-    if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CommandError::new(
-            "invalid_content_hash",
-            "The save request did not contain a valid base hash.",
-        ));
-    }
+    validate_content_hash(expected_hash)?;
 
     let relative = validate_relative_note_path(relative_path)?;
     let target = fs::canonicalize(root.join(relative))
@@ -678,7 +812,11 @@ pub fn run() {
             get_runtime_info,
             select_vault,
             open_note,
-            save_note
+            save_note,
+            write_recovery_draft,
+            list_recovery_drafts,
+            read_recovery_draft,
+            clear_recovery_draft
         ])
         .run(tauri::generate_context!());
 
@@ -874,6 +1012,36 @@ mod tests {
             original
         );
         assert!(internal_artifacts(&root).is_empty());
+    }
+
+    #[test]
+    fn recovery_cleanup_failure_does_not_fail_a_verified_save() {
+        let (_temp, root) = canonical_temp_root();
+        let original = b"original\n";
+        fs::write(root.join("note.md"), original).expect("fixture should be written");
+        let cleanup_called = Cell::new(false);
+
+        let result = save_markdown_note_and_cleanup(
+            &root,
+            "note.md",
+            "changed\n",
+            &hash_bytes(original),
+            || {
+                cleanup_called.set(true);
+                Err(CommandError::new(
+                    "recovery_cleanup_failed",
+                    "injected cleanup failure",
+                ))
+            },
+        )
+        .expect("verified save should remain successful");
+
+        assert_eq!(result.status, SaveStatus::Saved);
+        assert!(cleanup_called.get());
+        assert_eq!(
+            fs::read(root.join("note.md")).expect("saved note should read"),
+            b"changed\n"
+        );
     }
 
     #[test]
