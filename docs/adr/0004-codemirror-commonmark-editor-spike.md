@@ -46,3 +46,24 @@ extension:
 - Automated tests cover source preservation, selection-driven syntax reveal,
   Unicode edits, undo/redo, and mode switching. Real Vietnamese IME composition
   still requires a visible Windows smoke test.
+
+## Spike evidence and disposition
+
+Disposition: **Go with guardrails** for the CodeMirror 6/CommonMark editor
+architecture. This does not yet approve every planned Live Preview element.
+
+Reference run on 2026-08-31:
+
+- Windows `10.0.26300.9278`, Intel Core i5-8300H, 16 GB RAM, Node `26.8.1`.
+- Fixture: 5,000 syntax-dense blocks, 728 KiB Markdown, 25,000 preview
+  decorations.
+- Full parse to EOF plus all decorations: mean 147.78 ms; p99 261.50 ms.
+- One-character edit at EOF plus full decoration rebuild: mean 18.81 ms; p99
+  24.01 ms.
+- Selection move plus full decoration rebuild: mean 13.56 ms; p99 19.36 ms.
+
+The measured edit and selection work stays under the initial 50 ms long-task
+budget on the reference machine. Initial full parsing can exceed that budget,
+so it must not block interactive startup. Source-mode fallback, a measured note
+soft limit, viewport/incremental decoration work as syntax coverage grows, and
+a visible Vietnamese IME smoke test remain required before production approval.

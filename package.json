@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "benchmark:editor": "vitest bench --run src/editor/markdownPreview.bench.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "preview": "vite preview",
@@ -29,6 +30,6 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^4.1.11"
+    "vitest": "4.1.11"
   }
 }

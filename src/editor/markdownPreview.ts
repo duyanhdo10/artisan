@@ -20,10 +20,11 @@ function selectionTouches(state: EditorState, from: number, to: number) {
 
 export function buildMarkdownPreviewDecorations(
   state: EditorState,
+  tree = syntaxTree(state),
 ): DecorationSet {
   const ranges: Range<Decoration>[] = [];
 
-  syntaxTree(state).iterate({
+  tree.iterate({
     enter(node) {
       const headingMatch = headingPattern.exec(node.name);
       if (headingMatch) {
