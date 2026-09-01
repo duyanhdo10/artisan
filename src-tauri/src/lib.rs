@@ -1,14 +1,18 @@
 mod recovery;
+mod watcher;
 
 use recovery::{RecoveryDraft, RecoveryDraftListItem, RecoveryDraftSummary};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -55,7 +59,7 @@ pub struct RuntimeInfo {
     architecture: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteEntry {
     relative_path: String,
@@ -67,6 +71,7 @@ pub struct NoteEntry {
 pub struct VaultSummary {
     name: String,
     notes: Vec<NoteEntry>,
+    vault_session: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +112,9 @@ pub struct SaveResult {
 struct VaultState {
     root: Mutex<Option<PathBuf>>,
     write_lock: Arc<Mutex<()>>,
+    watcher: Mutex<Option<watcher::VaultWatcher>>,
+    expected_writes: Mutex<watcher::ExpectedWrites>,
+    next_vault_session: AtomicU64,
 }
 
 #[tauri::command]
@@ -151,10 +159,31 @@ async fn select_vault(
         .unwrap_or("Vault")
         .to_owned();
 
-    let mut current_root = state.root.lock().map_err(|_| CommandError::internal())?;
-    *current_root = Some(root);
+    let vault_session = state
+        .next_vault_session
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    let expected_writes = Arc::new(Mutex::new(HashMap::new()));
+    let next_watcher = watcher::start_vault_watcher(
+        app,
+        root.clone(),
+        vault_session,
+        Arc::clone(&expected_writes),
+        Arc::clone(&state.write_lock),
+    )?;
 
-    Ok(Some(VaultSummary { name, notes }))
+    *state.watcher.lock().map_err(|_| CommandError::internal())? = Some(next_watcher);
+    *state
+        .expected_writes
+        .lock()
+        .map_err(|_| CommandError::internal())? = expected_writes;
+    *state.root.lock().map_err(|_| CommandError::internal())? = Some(root);
+
+    Ok(Some(VaultSummary {
+        name,
+        notes,
+        vault_session,
+    }))
 }
 
 #[tauri::command]
@@ -188,17 +217,28 @@ async fn save_note(
         .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))?;
     let app_local_data_root = app_local_data_root(&app)?;
     let write_lock = Arc::clone(&state.write_lock);
+    let expected_writes = current_expected_writes(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
-        save_markdown_note_and_cleanup(&root, &relative_path, &content, &expected_hash, || {
-            recovery::clear_recovery_draft_if_content_matches(
-                &app_local_data_root,
-                &root,
-                &relative_path,
-                &content,
-            )
-        })
+        let result = save_markdown_note_and_cleanup(
+            &root,
+            &relative_path,
+            &content,
+            &expected_hash,
+            || {
+                recovery::clear_recovery_draft_if_content_matches(
+                    &app_local_data_root,
+                    &root,
+                    &relative_path,
+                    &content,
+                )
+            },
+        )?;
+        if result.status == SaveStatus::Saved {
+            watcher::record_expected_write(&expected_writes, &relative_path, &result.content_hash)?;
+        }
+        Ok(result)
     })
     .await
     .map_err(|_| CommandError::internal())?
@@ -380,6 +420,7 @@ async fn save_note_as_copy(
     })?;
     let app_local_data_root = app_local_data_root(&app)?;
     let write_lock = Arc::clone(&state.write_lock);
+    let expected_writes = current_expected_writes(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
@@ -391,10 +432,26 @@ async fn save_note_as_copy(
                 &content,
             )
         })?;
+        watcher::record_expected_write(
+            &expected_writes,
+            &copied.relative_path,
+            &copied.content_hash,
+        )?;
         Ok(Some(copied))
     })
     .await
     .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+fn reconcile_vault(state: tauri::State<'_, VaultState>) -> Result<(), CommandError> {
+    state
+        .watcher
+        .lock()
+        .map_err(|_| CommandError::internal())?
+        .as_ref()
+        .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))?
+        .request_reconcile()
 }
 
 fn current_vault_root(state: &VaultState) -> Result<PathBuf, CommandError> {
@@ -404,6 +461,14 @@ fn current_vault_root(state: &VaultState) -> Result<PathBuf, CommandError> {
         .map_err(|_| CommandError::internal())?
         .clone()
         .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))
+}
+
+fn current_expected_writes(state: &VaultState) -> Result<watcher::ExpectedWrites, CommandError> {
+    state
+        .expected_writes
+        .lock()
+        .map_err(|_| CommandError::internal())
+        .map(|expected| Arc::clone(&expected))
 }
 
 fn app_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
@@ -1095,6 +1160,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
             select_vault,
+            reconcile_vault,
             open_note,
             save_note,
             write_recovery_draft,

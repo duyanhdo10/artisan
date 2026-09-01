@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearRecoveryDraft,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
+  listenVaultChanges,
   listRecoveryDrafts,
   normalizeCommandError,
   readRecoveryDraft,
+  reconcileVault,
   saveNote,
   saveNoteAsCopy,
   writeRecoveryDraft,
@@ -16,8 +19,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(),
+}));
+
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
+  vi.mocked(listen).mockReset();
 });
 
 describe("normalizeCommandError", () => {
@@ -64,6 +72,39 @@ describe("saveNote", () => {
       content: "# Astian\n",
       expectedHash: "a".repeat(64),
     });
+  });
+});
+
+describe("vault watcher IPC", () => {
+  it("requests reconciliation without sending a vault path", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await expect(reconcileVault()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("reconcile_vault");
+  });
+
+  it("forwards only the typed watcher event payload", async () => {
+    const unlisten = vi.fn();
+    let nativeHandler: ((event: { payload: unknown }) => void) | undefined;
+    vi.mocked(listen).mockImplementation(async (_event, handler) => {
+      nativeHandler = handler as (event: { payload: unknown }) => void;
+      return unlisten;
+    });
+    const handler = vi.fn();
+    const payload = {
+      vaultSession: 2,
+      revision: 4,
+      status: "changed" as const,
+      errorCode: null,
+      changes: [],
+      notes: [],
+    };
+
+    await expect(listenVaultChanges(handler)).resolves.toBe(unlisten);
+    nativeHandler?.({ payload });
+
+    expect(listen).toHaveBeenCalledWith("vault://changed", expect.any(Function));
+    expect(handler).toHaveBeenCalledWith(payload);
   });
 });
 

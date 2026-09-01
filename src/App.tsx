@@ -15,15 +15,18 @@ import {
   formatNoteSize,
   getNoteSizePolicy,
 } from "./editor/noteSizePolicy";
+import { decideActiveNoteWatcherAction } from "./editor/watcherPolicy";
 import {
   clearRecoveryDraft,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
   getRuntimeInfo,
+  listenVaultChanges,
   listRecoveryDrafts,
   normalizeCommandError,
   openNote,
   readRecoveryDraft,
+  reconcileVault,
   saveNote,
   saveNoteAsCopy,
   selectVault,
@@ -32,6 +35,7 @@ import {
   type RecoveryDraftSummary,
   type RuntimeInfo,
   type UnavailableRecoveryDraft,
+  type VaultWatcherEvent,
   type VaultSummary,
 } from "./lib/tauri";
 
@@ -47,6 +51,7 @@ function App() {
   const [activeNote, setActiveNote] = useState<OpenedNote | null>(null);
   const [draft, setDraft] = useState("");
   const [operationError, setOperationError] = useState<string | null>(null);
+  const [watcherNotice, setWatcherNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
@@ -65,11 +70,22 @@ function App() {
   const expectedRecoveryHashRef = useRef<string | null>(null);
   const allowWindowCloseRef = useRef(false);
   const closeAfterSaveRef = useRef(false);
+  const vaultRef = useRef<VaultSummary | null>(null);
+  const activeNoteRef = useRef<OpenedNote | null>(null);
+  const draftRef = useRef("");
+  const editorRevisionRef = useRef(0);
+  const watcherEventQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastWatcherEventRef = useRef({ vaultSession: 0, revision: 0 });
   const isDirty = activeNote !== null && draft !== activeNote.content;
   const noteSizePolicy = getNoteSizePolicy(draft);
   const livePreviewLimited =
     activeNote !== null && !noteSizePolicy.livePreviewAllowed;
   const effectiveEditorMode = livePreviewLimited ? "source" : editorMode;
+
+  vaultRef.current = vault;
+  activeNoteRef.current = activeNote;
+  draftRef.current = draft;
+  editorRevisionRef.current = editorRevision;
 
   useEffect(() => {
     let active = true;
@@ -87,6 +103,150 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    async function processWatcherEvent(event: VaultWatcherEvent) {
+      if (disposed) return;
+      const currentVault = vaultRef.current;
+      if (!currentVault || event.vaultSession !== currentVault.vaultSession) {
+        return;
+      }
+      const lastEvent = lastWatcherEventRef.current;
+      if (
+        lastEvent.vaultSession === event.vaultSession &&
+        event.revision <= lastEvent.revision
+      ) {
+        return;
+      }
+      lastWatcherEventRef.current = {
+        vaultSession: event.vaultSession,
+        revision: event.revision,
+      };
+
+      if (event.status === "rescan_required") {
+        setWatcherNotice(null);
+        setOperationError(
+          "Vault changes could not be reconciled yet. Astian will retry when the window regains focus.",
+        );
+        return;
+      }
+
+      const nextVault = { ...currentVault, notes: event.notes };
+      vaultRef.current = nextVault;
+      setVault((current) =>
+        current?.vaultSession === event.vaultSession ? nextVault : current,
+      );
+
+      const currentNote = activeNoteRef.current;
+      const dirty =
+        currentNote !== null && draftRef.current !== currentNote.content;
+      const action = decideActiveNoteWatcherAction(
+        event.changes,
+        currentNote?.relativePath ?? null,
+        dirty,
+      );
+      if (action.kind === "none") return;
+      if (action.kind === "conflict") {
+        setWatcherNotice(null);
+        setSaveState("conflict");
+        setOperationError(
+          "The active note changed outside Astian while local edits were pending. Autosave was stopped.",
+        );
+        return;
+      }
+      if (action.kind === "close") {
+        activeNoteRef.current = null;
+        draftRef.current = "";
+        editorRevisionRef.current = 0;
+        setActiveNote(null);
+        setDraft("");
+        setEditorRevision(0);
+        setSaveState("idle");
+        setRecoveryState("idle");
+        expectedRecoveryHashRef.current = null;
+        setOperationError(null);
+        setWatcherNotice("The active note was deleted outside Astian.");
+        return;
+      }
+
+      const observedPath = currentNote?.relativePath;
+      const observedRevision = editorRevisionRef.current;
+      try {
+        const reloaded = await openNote(action.relativePath);
+        const latestActiveNote = activeNoteRef.current;
+        if (
+          disposed ||
+          !latestActiveNote ||
+          latestActiveNote.relativePath !== observedPath
+        ) {
+          return;
+        }
+        const changedWhileReloading =
+          editorRevisionRef.current !== observedRevision ||
+          draftRef.current !== latestActiveNote.content;
+        if (changedWhileReloading) {
+          setWatcherNotice(null);
+          setSaveState("conflict");
+          setOperationError(
+            "The active note changed outside Astian while local edits were pending. Autosave was stopped.",
+          );
+          return;
+        }
+
+        activeNoteRef.current = reloaded;
+        draftRef.current = reloaded.content;
+        editorRevisionRef.current = 0;
+        setActiveNote(reloaded);
+        setDraft(reloaded.content);
+        setEditorRevision(0);
+        setSaveState("idle");
+        setRecoveryState("idle");
+        expectedRecoveryHashRef.current = null;
+        setOperationError(null);
+        setWatcherNotice(
+          action.relativePath === observedPath
+            ? "The active note was reloaded after an external change."
+            : `The active note was renamed outside Astian to ${action.relativePath}.`,
+        );
+      } catch (error: unknown) {
+        setWatcherNotice(null);
+        setOperationError(normalizeCommandError(error).message);
+      }
+    }
+
+    listenVaultChanges((event) => {
+      watcherEventQueueRef.current = watcherEventQueueRef.current
+        .catch(() => undefined)
+        .then(() => processWatcherEvent(event));
+    })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch(() => {
+        // Browser-only frontend previews do not expose native events.
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleWindowFocus() {
+      if (!vaultRef.current) return;
+      void reconcileVault().catch((error: unknown) => {
+        setOperationError(normalizeCommandError(error).message);
+      });
+    }
+
+    window.addEventListener("focus", handleWindowFocus);
+    return () => window.removeEventListener("focus", handleWindowFocus);
+  }, []);
+
   async function handleSelectVault() {
     if (isDirty) {
       const saved = await handleSave();
@@ -95,10 +255,19 @@ function App() {
 
     setBusy(true);
     setOperationError(null);
+    setWatcherNotice(null);
 
     try {
       const selectedVault = await selectVault();
       if (selectedVault) {
+        vaultRef.current = selectedVault;
+        activeNoteRef.current = null;
+        draftRef.current = "";
+        editorRevisionRef.current = 0;
+        lastWatcherEventRef.current = {
+          vaultSession: selectedVault.vaultSession,
+          revision: 0,
+        };
         setVault(selectedVault);
         setActiveNote(null);
         setDraft("");
@@ -122,6 +291,7 @@ function App() {
               item.status === "unavailable",
           ),
         );
+        await reconcileVault();
       }
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
@@ -145,9 +315,13 @@ function App() {
 
     setBusy(true);
     setOperationError(null);
+    setWatcherNotice(null);
 
     try {
       const note = await openNote(relativePath);
+      activeNoteRef.current = note;
+      draftRef.current = note.content;
+      editorRevisionRef.current = 0;
       setActiveNote(note);
       setDraft(note.content);
       setSaveState("idle");
@@ -177,9 +351,17 @@ function App() {
     const expectedHash = activeNote.contentHash;
     setSaveState("saving");
     setOperationError(null);
+    setWatcherNotice(null);
 
     try {
       const result = await saveNote(notePath, contentToSave, expectedHash);
+      if (activeNoteRef.current?.relativePath === notePath) {
+        activeNoteRef.current = {
+          ...activeNoteRef.current,
+          content: contentToSave,
+          contentHash: result.contentHash,
+        };
+      }
       setActiveNote((current) =>
         current?.relativePath === notePath
           ? {
@@ -212,11 +394,15 @@ function App() {
 
     setBusy(true);
     setOperationError(null);
+    setWatcherNotice(null);
     try {
       if (expectedRecoveryHashRef.current !== null) {
         await clearRecoveryDraft(activeNote.relativePath);
       }
       const note = await openNote(activeNote.relativePath);
+      activeNoteRef.current = note;
+      draftRef.current = note.content;
+      editorRevisionRef.current = 0;
       setActiveNote(note);
       setDraft(note.content);
       setSaveState("idle");
@@ -264,6 +450,9 @@ function App() {
         openNote(summary.relativePath),
         readRecoveryDraft(summary.relativePath),
       ]);
+      activeNoteRef.current = note;
+      draftRef.current = recovery.content;
+      editorRevisionRef.current = recovery.editorRevision;
       setActiveNote(note);
       setDraft(recovery.content);
       setEditorRevision(recovery.editorRevision);
@@ -329,6 +518,9 @@ function App() {
       const copied = await saveNoteAsCopy(sourceRelativePath, contentToCopy);
       if (!copied) return;
 
+      activeNoteRef.current = copied;
+      draftRef.current = copied.content;
+      editorRevisionRef.current = 0;
       setActiveNote(copied);
       setDraft(copied.content);
       setEditorRevision(0);
@@ -600,6 +792,8 @@ function App() {
     recoveryDrafts.length > 0 || unavailableRecoveryDrafts.length > 0;
 
   const handleDraftChange = useCallback((value: string) => {
+    draftRef.current = value;
+    editorRevisionRef.current += 1;
     setDraft(value);
     setEditorRevision((revision) => revision + 1);
     setSaveState((current) => (current === "failed" ? "idle" : current));
@@ -871,6 +1065,11 @@ function App() {
               {recoveryNotice ? (
                 <span className="recovery-notice">{recoveryNotice}</span>
               ) : null}
+            </div>
+          ) : null}
+          {watcherNotice ? (
+            <div className="watcher-banner" role="status">
+              {watcherNotice}
             </div>
           ) : null}
           {operationError ? <div className="error-banner" role="alert">{operationError}</div> : null}

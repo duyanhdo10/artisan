@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+const VAULT_CHANGED_EVENT = "vault://changed";
 
 export interface RuntimeInfo {
   appVersion: string;
@@ -18,6 +21,24 @@ export interface NoteEntry {
 
 export interface VaultSummary {
   name: string;
+  notes: NoteEntry[];
+  vaultSession: number;
+}
+
+export interface VaultChange {
+  kind: "created" | "modified" | "deleted" | "renamed";
+  source: "astian" | "external";
+  relativePath: string;
+  previousRelativePath: string | null;
+  contentHash: string | null;
+}
+
+export interface VaultWatcherEvent {
+  vaultSession: number;
+  revision: number;
+  status: "changed" | "rescan_required";
+  errorCode: string | null;
+  changes: VaultChange[];
   notes: NoteEntry[];
 }
 
@@ -83,6 +104,18 @@ export function getRuntimeInfo(): Promise<RuntimeInfo> {
 
 export function selectVault(): Promise<VaultSummary | null> {
   return invoke<VaultSummary | null>("select_vault");
+}
+
+export function reconcileVault(): Promise<void> {
+  return invoke<void>("reconcile_vault");
+}
+
+export function listenVaultChanges(
+  handler: (event: VaultWatcherEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<VaultWatcherEvent>(VAULT_CHANGED_EVENT, (event) => {
+    handler(event.payload);
+  });
 }
 
 export function openNote(relativePath: string): Promise<OpenedNote> {
