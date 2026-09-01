@@ -11,6 +11,8 @@ import {
 } from "./editor/noteSizePolicy";
 import {
   clearRecoveryDraft,
+  deleteUnavailableRecoveryDraft,
+  exportUnavailableRecoveryDraft,
   getRuntimeInfo,
   listRecoveryDrafts,
   normalizeCommandError,
@@ -23,6 +25,7 @@ import {
   type OpenedNote,
   type RecoveryDraftSummary,
   type RuntimeInfo,
+  type UnavailableRecoveryDraft,
   type VaultSummary,
 } from "./lib/tauri";
 
@@ -42,6 +45,13 @@ function App() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryDraftSummary[]>([]);
+  const [unavailableRecoveryDrafts, setUnavailableRecoveryDrafts] = useState<
+    UnavailableRecoveryDraft[]
+  >([]);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [pendingRecoveryDeleteId, setPendingRecoveryDeleteId] = useState<
+    string | null
+  >(null);
   const [editorRevision, setEditorRevision] = useState(0);
   const [editorMode, setEditorMode] =
     useState<MarkdownEditorMode>("live-preview");
@@ -87,10 +97,23 @@ function App() {
         setSaveState("idle");
         setRecoveryState("idle");
         setRecoveryDrafts([]);
+        setUnavailableRecoveryDrafts([]);
+        setRecoveryNotice(null);
+        setPendingRecoveryDeleteId(null);
         setEditorRevision(0);
         expectedRecoveryHashRef.current = null;
-        const pendingRecoveryDrafts = await listRecoveryDrafts();
-        setRecoveryDrafts(pendingRecoveryDrafts);
+        const recoveryItems = await listRecoveryDrafts();
+        setRecoveryDrafts(
+          recoveryItems.flatMap((item) =>
+            item.status === "available" ? [item.draft] : [],
+          ),
+        );
+        setUnavailableRecoveryDrafts(
+          recoveryItems.filter(
+            (item): item is UnavailableRecoveryDraft =>
+              item.status === "unavailable",
+          ),
+        );
       }
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
@@ -313,6 +336,63 @@ function App() {
     }
   }
 
+  async function handleExportUnavailableRecovery(
+    recovery: UnavailableRecoveryDraft,
+  ) {
+    if (busy) return;
+
+    setBusy(true);
+    setOperationError(null);
+    setRecoveryNotice(null);
+    try {
+      const exported = await exportUnavailableRecoveryDraft(
+        recovery.recoveryId,
+        recovery.artifactHash,
+      );
+      if (exported) {
+        setRecoveryNotice(
+          `Recovery data ${recovery.recoveryId.slice(0, 8)} was exported.`,
+        );
+      }
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteUnavailableRecovery(
+    recovery: UnavailableRecoveryDraft,
+  ) {
+    if (busy) return;
+    if (pendingRecoveryDeleteId !== recovery.recoveryId) {
+      setPendingRecoveryDeleteId(recovery.recoveryId);
+      setRecoveryNotice(
+        "This cannot be undone. Export first if the data may still be useful, then confirm delete.",
+      );
+      return;
+    }
+
+    setBusy(true);
+    setOperationError(null);
+    setRecoveryNotice(null);
+    try {
+      await deleteUnavailableRecoveryDraft(
+        recovery.recoveryId,
+        recovery.artifactHash,
+      );
+      setUnavailableRecoveryDrafts((current) =>
+        current.filter((item) => item.recoveryId !== recovery.recoveryId),
+      );
+      setPendingRecoveryDeleteId(null);
+      setRecoveryNotice("Unavailable recovery data was deleted.");
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!activeNote || !isDirty || activeNote.lineEnding === "mixed") {
       setRecoveryState("idle");
@@ -423,6 +503,8 @@ function App() {
           : recoveryState === "failed"
             ? "Recovery failed"
             : null;
+  const hasRecoveryItems =
+    recoveryDrafts.length > 0 || unavailableRecoveryDrafts.length > 0;
 
   const handleDraftChange = useCallback((value: string) => {
     setDraft(value);
@@ -530,7 +612,7 @@ function App() {
 
         <section
           className={
-            recoveryDrafts.length > 0
+            hasRecoveryItems
               ? "editor-pane has-recovery"
               : "editor-pane"
           }
@@ -624,9 +706,11 @@ function App() {
               </button>
             </div>
           </div>
-          {recoveryDrafts.length > 0 ? (
+          {hasRecoveryItems ? (
             <div className="recovery-banner" role="status">
-              <strong>Unsaved recovery drafts found</strong>
+              {recoveryDrafts.length > 0 ? (
+                <strong>Unsaved recovery drafts found</strong>
+              ) : null}
               {recoveryDrafts.map((summary) => (
                 <div className="recovery-item" key={summary.relativePath}>
                   <span>{summary.relativePath}</span>
@@ -654,6 +738,42 @@ function App() {
                   </button>
                 </div>
               ))}
+              {unavailableRecoveryDrafts.length > 0 ? (
+                <strong>Unavailable recovery data needs review</strong>
+              ) : null}
+              {unavailableRecoveryDrafts.map((recovery) => (
+                <div
+                  className="recovery-item unavailable-recovery-item"
+                  key={recovery.recoveryId}
+                >
+                  <span>
+                    {recovery.reason === "unsupported"
+                      ? "Unsupported recovery format"
+                      : "Corrupt recovery data"}
+                    {` · ${recovery.recoveryId.slice(0, 8)}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleExportUnavailableRecovery(recovery)}
+                    disabled={busy}
+                  >
+                    Export data
+                  </button>
+                  <button
+                    className="discard-recovery"
+                    type="button"
+                    onClick={() => handleDeleteUnavailableRecovery(recovery)}
+                    disabled={busy}
+                  >
+                    {pendingRecoveryDeleteId === recovery.recoveryId
+                      ? "Confirm delete"
+                      : "Delete…"}
+                  </button>
+                </div>
+              ))}
+              {recoveryNotice ? (
+                <span className="recovery-notice">{recoveryNotice}</span>
+              ) : null}
             </div>
           ) : null}
           {operationError ? <div className="error-banner" role="alert">{operationError}</div> : null}

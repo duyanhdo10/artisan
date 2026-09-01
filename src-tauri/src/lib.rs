@@ -1,6 +1,6 @@
 mod recovery;
 
-use recovery::{RecoveryDraft, RecoveryDraftSummary};
+use recovery::{RecoveryDraft, RecoveryDraftListItem, RecoveryDraftSummary};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -238,7 +238,7 @@ async fn write_recovery_draft(
 async fn list_recovery_drafts(
     app: tauri::AppHandle,
     state: tauri::State<'_, VaultState>,
-) -> Result<Vec<RecoveryDraftSummary>, CommandError> {
+) -> Result<Vec<RecoveryDraftListItem>, CommandError> {
     let root = current_vault_root(&state)?;
     let app_local_data_root = app_local_data_root(&app)?;
     let write_lock = Arc::clone(&state.write_lock);
@@ -282,6 +282,72 @@ async fn clear_recovery_draft(
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
         recovery::clear_recovery_draft(&app_local_data_root, &root, &relative_path)
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn export_unavailable_recovery_draft(
+    app: tauri::AppHandle,
+    recovery_id: String,
+    expected_artifact_hash: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<bool, CommandError> {
+    let root = current_vault_root(&state)?;
+    let suggested_name = recovery::suggested_unavailable_export_name(&recovery_id)?;
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_file_name(suggested_name)
+        .add_filter("Recovery data", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let selected_path = selected.into_path().map_err(|_| {
+        CommandError::new(
+            "unsupported_recovery_export_path",
+            "The selected recovery export path is not supported on this platform.",
+        )
+    })?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::export_unavailable_recovery_draft(
+            &app_local_data_root,
+            &root,
+            &recovery_id,
+            &expected_artifact_hash,
+            &selected_path,
+        )?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn delete_unavailable_recovery_draft(
+    app: tauri::AppHandle,
+    recovery_id: String,
+    expected_artifact_hash: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<(), CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = app_local_data_root(&app)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        recovery::delete_unavailable_recovery_draft(
+            &app_local_data_root,
+            &root,
+            &recovery_id,
+            &expected_artifact_hash,
+        )
     })
     .await
     .map_err(|_| CommandError::internal())?
@@ -1035,6 +1101,8 @@ pub fn run() {
             list_recovery_drafts,
             read_recovery_draft,
             clear_recovery_draft,
+            export_unavailable_recovery_draft,
+            delete_unavailable_recovery_draft,
             save_note_as_copy
         ])
         .run(tauri::generate_context!());

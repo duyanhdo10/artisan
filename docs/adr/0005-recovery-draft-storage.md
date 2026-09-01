@@ -56,6 +56,13 @@ layout is:
 - Corrupt, unsupported-schema, identity-mismatched, or hash-mismatched recovery
   data is never applied automatically or deleted silently. Astian reports it
   as unavailable recovery data and leaves it for explicit cleanup/export.
+- Recovery listing is a typed `available`/`unavailable` union. Unavailable
+  entries expose only an opaque hashed recovery ID, artifact hash, and stable
+  reason; raw bytes, note content, and untrusted paths do not cross into the UI.
+- Export of unavailable data uses a native save dialog and durable sibling-temp
+  plus create-no-clobber semantics. Explicit delete requires the artifact hash
+  returned by listing, revalidates that the artifact is still unavailable, and
+  uses a two-step confirmation in the UI.
 - Recovery content is not returned in a list call. The UI first receives typed
   metadata and requests one selected draft by identity when restoring.
 - Recovery content and relative paths must not appear in logs or analytics.
@@ -72,6 +79,9 @@ When a vault opens, Astian validates recovery metadata against that vault:
   as the preferred non-destructive action.
 - A missing/renamed target remains recoverable as content that can be saved as
   a new copy; Astian does not guess a rename from path similarity.
+- Corrupt and unsupported entries do not block valid drafts from being listed.
+  They remain in app-local-data until the user exports or explicitly deletes
+  the exact artifact revision shown by the recovery manager.
 
 ## Consequences
 

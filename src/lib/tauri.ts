@@ -46,6 +46,17 @@ export interface RecoveryDraft extends RecoveryDraftSummary {
   content: string;
 }
 
+export interface UnavailableRecoveryDraft {
+  status: "unavailable";
+  recoveryId: string;
+  artifactHash: string;
+  reason: "corrupt" | "unsupported";
+}
+
+export type RecoveryDraftListItem =
+  | { status: "available"; draft: RecoveryDraftSummary }
+  | UnavailableRecoveryDraft;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -106,8 +117,8 @@ export function writeRecoveryDraft(
   });
 }
 
-export function listRecoveryDrafts(): Promise<RecoveryDraftSummary[]> {
-  return invoke<RecoveryDraftSummary[]>("list_recovery_drafts");
+export function listRecoveryDrafts(): Promise<RecoveryDraftListItem[]> {
+  return invoke<RecoveryDraftListItem[]>("list_recovery_drafts");
 }
 
 export function readRecoveryDraft(relativePath: string): Promise<RecoveryDraft> {
@@ -116,6 +127,26 @@ export function readRecoveryDraft(relativePath: string): Promise<RecoveryDraft> 
 
 export function clearRecoveryDraft(relativePath: string): Promise<void> {
   return invoke<void>("clear_recovery_draft", { relativePath });
+}
+
+export function exportUnavailableRecoveryDraft(
+  recoveryId: string,
+  expectedArtifactHash: string,
+): Promise<boolean> {
+  return invoke<boolean>("export_unavailable_recovery_draft", {
+    recoveryId,
+    expectedArtifactHash,
+  });
+}
+
+export function deleteUnavailableRecoveryDraft(
+  recoveryId: string,
+  expectedArtifactHash: string,
+): Promise<void> {
+  return invoke<void>("delete_unavailable_recovery_draft", {
+    recoveryId,
+    expectedArtifactHash,
+  });
 }
 
 export function saveNoteAsCopy(

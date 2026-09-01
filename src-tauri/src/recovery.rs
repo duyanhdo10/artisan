@@ -54,6 +54,30 @@ pub(crate) struct RecoveryDraft {
     content: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RecoveryDraftIssue {
+    Corrupt,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum RecoveryDraftListItem {
+    Available {
+        draft: RecoveryDraftSummary,
+    },
+    Unavailable {
+        recovery_id: String,
+        artifact_hash: String,
+        reason: RecoveryDraftIssue,
+    },
+}
+
 struct RecoveryDraftInput<'a> {
     relative_path: &'a str,
     content: &'a str,
@@ -293,7 +317,7 @@ fn validate_draft_precondition(
 pub(crate) fn list_recovery_drafts(
     app_local_data_root: &Path,
     vault_root: &Path,
-) -> Result<Vec<RecoveryDraftSummary>, CommandError> {
+) -> Result<Vec<RecoveryDraftListItem>, CommandError> {
     let expected_vault_id = vault_id(vault_root);
     let recovery_dir = recovery_directory(app_local_data_root, &expected_vault_id);
     let entries = match fs::read_dir(recovery_dir) {
@@ -307,7 +331,8 @@ pub(crate) fn list_recovery_drafts(
         }
     };
 
-    let mut drafts = Vec::new();
+    let mut available = Vec::new();
+    let mut unavailable = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| {
             CommandError::new(
@@ -319,17 +344,102 @@ pub(crate) fn list_recovery_drafts(
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let stored = read_and_validate(&path, &expected_vault_id, None)?;
-        drafts.push(summary_from(&stored));
+        let Some(recovery_id) = recovery_id_from_path(&path) else {
+            continue;
+        };
+        match read_and_validate(&path, &expected_vault_id, None) {
+            Ok(stored) => available.push(summary_from(&stored)),
+            Err(error) => {
+                let Some(reason) = unavailable_reason(&error) else {
+                    return Err(error);
+                };
+                let bytes = fs::read(&path).map_err(|_| {
+                    CommandError::new(
+                        "recovery_read_failed",
+                        "The recovery draft could not be read.",
+                    )
+                })?;
+                unavailable.push(RecoveryDraftListItem::Unavailable {
+                    recovery_id,
+                    artifact_hash: hash_bytes(&bytes),
+                    reason,
+                });
+            }
+        }
     }
 
-    drafts.sort_by(|left, right| {
+    available.sort_by(|left, right| {
         right
             .updated_at_unix_ms
             .cmp(&left.updated_at_unix_ms)
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
-    Ok(drafts)
+    unavailable.sort_by(|left, right| match (left, right) {
+        (
+            RecoveryDraftListItem::Unavailable {
+                recovery_id: left, ..
+            },
+            RecoveryDraftListItem::Unavailable {
+                recovery_id: right, ..
+            },
+        ) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
+
+    Ok(available
+        .into_iter()
+        .map(|draft| RecoveryDraftListItem::Available { draft })
+        .chain(unavailable)
+        .collect())
+}
+
+pub(crate) fn suggested_unavailable_export_name(recovery_id: &str) -> Result<String, CommandError> {
+    validate_recovery_id(recovery_id)?;
+    Ok(format!("astian-recovery-{}.json", &recovery_id[..8]))
+}
+
+pub(crate) fn export_unavailable_recovery_draft(
+    app_local_data_root: &Path,
+    vault_root: &Path,
+    recovery_id: &str,
+    expected_artifact_hash: &str,
+    selected_path: &Path,
+) -> Result<(), CommandError> {
+    let bytes = read_unavailable_recovery_bytes(
+        app_local_data_root,
+        vault_root,
+        recovery_id,
+        expected_artifact_hash,
+    )?;
+    export_recovery_bytes(selected_path, &bytes)
+}
+
+pub(crate) fn delete_unavailable_recovery_draft(
+    app_local_data_root: &Path,
+    vault_root: &Path,
+    recovery_id: &str,
+    expected_artifact_hash: &str,
+) -> Result<(), CommandError> {
+    read_unavailable_recovery_bytes(
+        app_local_data_root,
+        vault_root,
+        recovery_id,
+        expected_artifact_hash,
+    )?;
+    let target = unavailable_draft_path(app_local_data_root, vault_root, recovery_id)?;
+    fs::remove_file(target).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            CommandError::new(
+                "recovery_changed",
+                "The recovery data changed before it could be deleted.",
+            )
+        } else {
+            CommandError::new(
+                "recovery_cleanup_failed",
+                "The recovery data could not be removed.",
+            )
+        }
+    })
 }
 
 pub(crate) fn read_recovery_draft(
@@ -417,8 +527,17 @@ fn read_and_validate(
             )
         }
     })?;
+    validate_stored_recovery(&bytes, path, expected_vault_id, expected_note_id)
+}
+
+fn validate_stored_recovery(
+    bytes: &[u8],
+    path: &Path,
+    expected_vault_id: &str,
+    expected_note_id: Option<&str>,
+) -> Result<StoredRecoveryDraft, CommandError> {
     let stored: StoredRecoveryDraft =
-        serde_json::from_slice(&bytes).map_err(|_| recovery_corrupt())?;
+        serde_json::from_slice(bytes).map_err(|_| recovery_corrupt())?;
 
     if stored.schema_version != RECOVERY_SCHEMA_VERSION {
         return Err(CommandError::new(
@@ -442,6 +561,199 @@ fn read_and_validate(
     }
 
     Ok(stored)
+}
+
+fn read_unavailable_recovery_bytes(
+    app_local_data_root: &Path,
+    vault_root: &Path,
+    recovery_id: &str,
+    expected_artifact_hash: &str,
+) -> Result<Vec<u8>, CommandError> {
+    validate_content_hash(expected_artifact_hash)?;
+    let expected_vault_id = vault_id(vault_root);
+    let path = unavailable_draft_path(app_local_data_root, vault_root, recovery_id)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            CommandError::new(
+                "recovery_changed",
+                "The recovery data changed before the operation completed.",
+            )
+        } else {
+            CommandError::new(
+                "recovery_read_failed",
+                "The recovery data could not be read.",
+            )
+        }
+    })?;
+    if !hash_bytes(&bytes).eq_ignore_ascii_case(expected_artifact_hash) {
+        return Err(CommandError::new(
+            "recovery_changed",
+            "The recovery data changed before the operation completed.",
+        ));
+    }
+
+    match validate_stored_recovery(&bytes, &path, &expected_vault_id, None) {
+        Ok(_) => Err(CommandError::new(
+            "recovery_changed",
+            "The recovery data is valid now and was left unchanged.",
+        )),
+        Err(error) if unavailable_reason(&error).is_some() => Ok(bytes),
+        Err(error) => Err(error),
+    }
+}
+
+fn export_recovery_bytes(selected_path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    export_recovery_bytes_with(selected_path, bytes, |source, target| {
+        fs::hard_link(source, target)
+    })
+}
+
+fn export_recovery_bytes_with<F>(
+    selected_path: &Path,
+    bytes: &[u8],
+    install_export: F,
+) -> Result<(), CommandError>
+where
+    F: Fn(&Path, &Path) -> io::Result<()>,
+{
+    let file_name = selected_path.file_name().ok_or_else(|| {
+        CommandError::new(
+            "invalid_recovery_export_path",
+            "Choose a JSON filename for the recovery export.",
+        )
+    })?;
+    let is_json = selected_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+    if !is_json {
+        return Err(CommandError::new(
+            "invalid_recovery_export_path",
+            "The recovery export must use a JSON filename.",
+        ));
+    }
+
+    let parent = selected_path.parent().ok_or_else(|| {
+        CommandError::new(
+            "invalid_recovery_export_path",
+            "Choose a JSON filename for the recovery export.",
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+        CommandError::new(
+            "recovery_export_parent_unavailable",
+            "The selected recovery export folder is unavailable.",
+        )
+    })?;
+    let target = canonical_parent.join(file_name);
+    if target.try_exists().map_err(|_| {
+        CommandError::new(
+            "recovery_export_target_unavailable",
+            "The recovery export destination could not be inspected.",
+        )
+    })? {
+        return Err(CommandError::new(
+            "recovery_export_exists",
+            "Astian will not overwrite an existing recovery export.",
+        ));
+    }
+
+    let mut temporary = TempFileBuilder::new()
+        .prefix(".astian-recovery-export-")
+        .suffix(".tmp")
+        .tempfile_in(&canonical_parent)
+        .map_err(|_| {
+            CommandError::new(
+                "recovery_export_prepare_failed",
+                "The recovery export could not be prepared.",
+            )
+        })?;
+    temporary
+        .write_all(bytes)
+        .and_then(|_| temporary.flush())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| {
+            CommandError::new(
+                "recovery_export_write_failed",
+                "The recovery export could not be written safely.",
+            )
+        })?;
+    let (temporary_file, temporary_path) = temporary.keep().map_err(|_| {
+        CommandError::new(
+            "recovery_export_prepare_failed",
+            "The recovery export could not be prepared.",
+        )
+    })?;
+    drop(temporary_file);
+    let _temporary_cleanup = CleanupPath(temporary_path.clone());
+
+    install_export(&temporary_path, &target).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            CommandError::new(
+                "recovery_export_exists",
+                "Astian will not overwrite an existing recovery export.",
+            )
+        } else {
+            CommandError::new(
+                "recovery_export_install_failed",
+                "The recovery export could not be installed safely.",
+            )
+        }
+    })?;
+    let exported = fs::read(&target).map_err(|_| {
+        CommandError::new(
+            "recovery_export_verification_failed",
+            "Astian could not verify the recovery export.",
+        )
+    })?;
+    if exported != bytes {
+        return Err(CommandError::new(
+            "recovery_export_verification_failed",
+            "Astian could not verify the recovery export.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn unavailable_draft_path(
+    app_local_data_root: &Path,
+    vault_root: &Path,
+    recovery_id: &str,
+) -> Result<PathBuf, CommandError> {
+    validate_recovery_id(recovery_id)?;
+    Ok(
+        recovery_directory(app_local_data_root, &vault_id(vault_root))
+            .join(format!("{recovery_id}.json")),
+    )
+}
+
+fn validate_recovery_id(recovery_id: &str) -> Result<(), CommandError> {
+    if recovery_id.len() != 64
+        || !recovery_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CommandError::new(
+            "invalid_recovery_id",
+            "The recovery data identifier is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_id_from_path(path: &Path) -> Option<String> {
+    let recovery_id = path.file_stem()?.to_str()?;
+    validate_recovery_id(recovery_id).ok()?;
+    Some(recovery_id.to_owned())
+}
+
+fn unavailable_reason(error: &CommandError) -> Option<RecoveryDraftIssue> {
+    match error.code {
+        "recovery_corrupt" => Some(RecoveryDraftIssue::Corrupt),
+        "recovery_unsupported" => Some(RecoveryDraftIssue::Unsupported),
+        _ => None,
+    }
 }
 
 fn normalize_relative_note_path(relative_path: &str) -> Result<String, CommandError> {
@@ -538,9 +850,15 @@ mod tests {
         let restored =
             read_recovery_draft(&app_data, &vault, relative_path).expect("draft should read");
 
-        assert_eq!(drafts, vec![summary]);
+        assert_eq!(
+            drafts,
+            vec![RecoveryDraftListItem::Available {
+                draft: summary.clone()
+            }]
+        );
         let metadata = serde_json::to_value(&drafts[0]).expect("metadata should serialize");
         assert!(metadata.get("content").is_none());
+        assert!(metadata["draft"].get("content").is_none());
         assert_eq!(restored.content, content);
         assert_eq!(restored.editor_revision, 7);
         assert!(vault.join(relative_path).is_file());
@@ -594,13 +912,52 @@ mod tests {
         let target = draft_path(&app_data, &vault, "note.md");
         fs::write(&target, b"not-json").expect("fixture should be corrupted");
 
-        let error = list_recovery_drafts(&app_data, &vault)
-            .expect_err("corrupt draft should fail validation");
-        assert_eq!(error.code, "recovery_corrupt");
+        let recovery_id = hash_bytes(b"note.md");
+        let artifact_hash = hash_bytes(b"not-json");
+        let drafts = list_recovery_drafts(&app_data, &vault)
+            .expect("corrupt draft should be listed for management");
+        assert_eq!(
+            drafts,
+            vec![RecoveryDraftListItem::Unavailable {
+                recovery_id: recovery_id.clone(),
+                artifact_hash: artifact_hash.clone(),
+                reason: RecoveryDraftIssue::Corrupt,
+            }]
+        );
+        let listed = serde_json::to_value(&drafts[0]).expect("list item should serialize");
+        assert_eq!(listed["status"], "unavailable");
+        assert_eq!(listed["recoveryId"], recovery_id);
+        assert_eq!(listed["artifactHash"], artifact_hash);
+        assert_eq!(listed["reason"], "corrupt");
+        assert!(listed.get("content").is_none());
         assert_eq!(
             fs::read(&target).expect("corrupt file should remain"),
             b"not-json"
         );
+
+        let export = app_data.join("export.json");
+        fs::create_dir_all(&app_data).expect("export parent should exist");
+        export_unavailable_recovery_draft(&app_data, &vault, &recovery_id, &artifact_hash, &export)
+            .expect("corrupt recovery data should export");
+        assert_eq!(fs::read(export).expect("export should read"), b"not-json");
+        assert_eq!(
+            fs::read(&target).expect("source should remain"),
+            b"not-json"
+        );
+
+        let stale_delete = delete_unavailable_recovery_draft(
+            &app_data,
+            &vault,
+            &recovery_id,
+            &hash_bytes(b"different"),
+        )
+        .expect_err("stale management item must not delete recovery data");
+        assert_eq!(stale_delete.code, "recovery_changed");
+        assert!(target.exists());
+
+        delete_unavailable_recovery_draft(&app_data, &vault, &recovery_id, &artifact_hash)
+            .expect("confirmed corrupt recovery data should delete");
+        assert!(!target.exists());
     }
 
     #[test]
@@ -664,14 +1021,82 @@ mod tests {
         let unsupported = serde_json::to_vec(&value).expect("fixture should serialize");
         fs::write(&target, &unsupported).expect("fixture should be updated");
 
-        let error = list_recovery_drafts(&app_data, &vault)
-            .expect_err("unsupported draft should fail validation");
-
-        assert_eq!(error.code, "recovery_unsupported");
+        let drafts = list_recovery_drafts(&app_data, &vault)
+            .expect("unsupported draft should be listed for management");
+        assert_eq!(
+            drafts,
+            vec![RecoveryDraftListItem::Unavailable {
+                recovery_id: hash_bytes(b"note.md"),
+                artifact_hash: hash_bytes(&unsupported),
+                reason: RecoveryDraftIssue::Unsupported,
+            }]
+        );
         assert_eq!(
             fs::read(&target).expect("unsupported draft should remain"),
             unsupported
         );
+    }
+
+    #[test]
+    fn recovery_management_refuses_invalid_id_valid_draft_and_existing_export() {
+        let (_temp, app_data, vault) = roots();
+        let base_hash = hash_bytes(b"saved");
+        write_recovery_draft(&app_data, &vault, "note.md", "draft", &base_hash, 1, None)
+            .expect("draft should write");
+        let recovery_id = hash_bytes(b"note.md");
+        let target = draft_path(&app_data, &vault, "note.md");
+        let artifact_hash = hash_bytes(&fs::read(&target).expect("draft should read"));
+
+        let invalid =
+            delete_unavailable_recovery_draft(&app_data, &vault, "../note", &artifact_hash)
+                .expect_err("invalid recovery id should be rejected");
+        let valid =
+            delete_unavailable_recovery_draft(&app_data, &vault, &recovery_id, &artifact_hash)
+                .expect_err("valid recovery draft must not be managed as unavailable");
+        assert_eq!(invalid.code, "invalid_recovery_id");
+        assert_eq!(valid.code, "recovery_changed");
+        assert!(target.exists());
+
+        fs::write(&target, b"not-json").expect("fixture should become corrupt");
+        let corrupt_hash = hash_bytes(b"not-json");
+        let export = app_data.join("existing.json");
+        fs::write(&export, b"external").expect("existing export should be written");
+        let existing = export_unavailable_recovery_draft(
+            &app_data,
+            &vault,
+            &recovery_id,
+            &corrupt_hash,
+            &export,
+        )
+        .expect_err("existing export must not be overwritten");
+        assert_eq!(existing.code, "recovery_export_exists");
+        assert_eq!(fs::read(export).expect("existing should read"), b"external");
+        assert_eq!(fs::read(target).expect("source should remain"), b"not-json");
+    }
+
+    #[test]
+    fn recovery_export_install_race_preserves_external_file_and_cleans_temp() {
+        let temp = tempfile::tempdir().expect("export directory should exist");
+        let target = temp.path().join("recovery.json");
+
+        let error = export_recovery_bytes_with(&target, b"recovery", |_, raced_target| {
+            fs::write(raced_target, b"external")?;
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "injected export race",
+            ))
+        })
+        .expect_err("raced export must not overwrite external data");
+
+        assert_eq!(error.code, "recovery_export_exists");
+        assert_eq!(fs::read(target).expect("target should read"), b"external");
+        assert!(fs::read_dir(temp.path())
+            .expect("export directory should read")
+            .all(|entry| !entry
+                .expect("entry should read")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".astian-recovery-export-")));
     }
 
     #[test]

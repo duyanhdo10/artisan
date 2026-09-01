@@ -339,6 +339,10 @@ small,
   gap: 8px;
 }
 
+.recovery-item.unavailable-recovery-item {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
 .recovery-item span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -358,6 +362,11 @@ small,
   color: #f0c6c6;
   border-color: #754b4b;
   background: #3a2426;
+}
+
+.recovery-notice {
+  color: #d6c28f;
+  line-height: 1.5;
 }
 
 .error-banner {

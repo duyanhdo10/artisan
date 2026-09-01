@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearRecoveryDraft,
+  deleteUnavailableRecoveryDraft,
+  exportUnavailableRecoveryDraft,
   listRecoveryDrafts,
   normalizeCommandError,
   readRecoveryDraft,
@@ -113,6 +115,30 @@ describe("recovery draft IPC", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "clear_recovery_draft", {
       relativePath: "notes/Astian.md",
     });
+  });
+
+  it("exports and deletes unavailable data by opaque id and artifact hash", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true).mockResolvedValueOnce(undefined);
+    const recoveryId = "a".repeat(64);
+    const artifactHash = "b".repeat(64);
+
+    await expect(
+      exportUnavailableRecoveryDraft(recoveryId, artifactHash),
+    ).resolves.toBe(true);
+    await expect(
+      deleteUnavailableRecoveryDraft(recoveryId, artifactHash),
+    ).resolves.toBeUndefined();
+
+    expect(invoke).toHaveBeenNthCalledWith(
+      1,
+      "export_unavailable_recovery_draft",
+      { recoveryId, expectedArtifactHash: artifactHash },
+    );
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "delete_unavailable_recovery_draft",
+      { recoveryId, expectedArtifactHash: artifactHash },
+    );
   });
 
   it("sends recovery content to Save As Copy without an absolute path", async () => {
