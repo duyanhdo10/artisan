@@ -221,6 +221,13 @@ small,
   background: #10191b;
 }
 
+.editor-mode-group {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
 .editor-mode button {
   border: 0;
   border-radius: 4px;
@@ -233,6 +240,19 @@ small,
 .editor-mode button.active {
   color: #d7e3e3;
   background: #26373a;
+}
+
+.editor-mode button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.note-size-warning {
+  overflow: hidden;
+  max-width: 240px;
+  color: #d6a95d;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .save-action,

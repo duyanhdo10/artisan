@@ -6,6 +6,10 @@ import {
   type MarkdownEditorMode,
 } from "./editor/MarkdownEditor";
 import {
+  formatNoteSize,
+  getNoteSizePolicy,
+} from "./editor/noteSizePolicy";
+import {
   clearRecoveryDraft,
   getRuntimeInfo,
   listRecoveryDrafts,
@@ -44,6 +48,10 @@ function App() {
   const recoveryWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const expectedRecoveryHashRef = useRef<string | null>(null);
   const isDirty = activeNote !== null && draft !== activeNote.content;
+  const noteSizePolicy = getNoteSizePolicy(draft);
+  const livePreviewLimited =
+    activeNote !== null && !noteSizePolicy.livePreviewAllowed;
+  const effectiveEditorMode = livePreviewLimited ? "source" : editorMode;
 
   useEffect(() => {
     let active = true;
@@ -529,23 +537,41 @@ function App() {
           aria-label="Markdown editor spike"
         >
           <div className="editor-toolbar">
-            <div className="editor-mode" aria-label="Editor mode">
-              <button
-                className={editorMode === "live-preview" ? "active" : ""}
-                type="button"
-                aria-pressed={editorMode === "live-preview"}
-                onClick={() => setEditorMode("live-preview")}
-              >
-                Live Preview
-              </button>
-              <button
-                className={editorMode === "source" ? "active" : ""}
-                type="button"
-                aria-pressed={editorMode === "source"}
-                onClick={() => setEditorMode("source")}
-              >
-                Source
-              </button>
+            <div className="editor-mode-group">
+              <div className="editor-mode" aria-label="Editor mode">
+                <button
+                  className={effectiveEditorMode === "live-preview" ? "active" : ""}
+                  type="button"
+                  aria-pressed={effectiveEditorMode === "live-preview"}
+                  aria-describedby={livePreviewLimited ? "note-size-warning" : undefined}
+                  title={
+                    livePreviewLimited
+                      ? "Live Preview is unavailable above the 512 KiB soft limit."
+                      : undefined
+                  }
+                  onClick={() => setEditorMode("live-preview")}
+                  disabled={livePreviewLimited}
+                >
+                  Live Preview
+                </button>
+                <button
+                  className={effectiveEditorMode === "source" ? "active" : ""}
+                  type="button"
+                  aria-pressed={effectiveEditorMode === "source"}
+                  onClick={() => setEditorMode("source")}
+                >
+                  Source
+                </button>
+              </div>
+              {livePreviewLimited ? (
+                <span
+                  className="note-size-warning"
+                  id="note-size-warning"
+                  role="status"
+                >
+                  Large note ({formatNoteSize(noteSizePolicy.utf8Bytes)}) · Source mode
+                </span>
+              ) : null}
             </div>
             <div className="save-controls">
               <span
@@ -636,7 +662,7 @@ function App() {
             ariaLabel="Markdown source"
             value={draft}
             onChange={handleDraftChange}
-            mode={editorMode}
+            mode={effectiveEditorMode}
             disabled={activeNote === null}
             readOnly={isMixedLineEnding}
           />

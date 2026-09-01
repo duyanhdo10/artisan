@@ -33,6 +33,9 @@ extension:
   from undo history; ordinary edits stay in CodeMirror history.
 - Raw HTML preview, inline active content, and parser-driven Markdown
   serialization are not part of this spike.
+- Live Preview has a provisional 512 KiB UTF-8 soft limit. Larger notes remain
+  fully editable and saveable in Source mode; the mode change is presentation
+  only and does not replace the CodeMirror document or history.
 
 ## Consequences
 
@@ -64,6 +67,9 @@ Reference run on 2026-08-31:
 
 The measured edit and selection work stays under the initial 50 ms long-task
 budget on the reference machine. Initial full parsing can exceed that budget,
-so it must not block interactive startup. Source-mode fallback, a measured note
-soft limit, viewport/incremental decoration work as syntax coverage grows, and
-a visible Vietnamese IME smoke test remain required before production approval.
+so it must not block interactive startup. The provisional 512 KiB soft limit is
+intentionally below the 728 KiB fixture where initial parse p99 reached 261.50
+ms. It must be recalibrated with visible DOM/cold-start measurements rather than
+treated as a permanent format limit. Viewport/incremental decoration work as
+syntax coverage grows and a visible Vietnamese IME smoke test remain required
+before production approval.
