@@ -47,8 +47,10 @@ extension:
 - The initial demo decorates only ATX headings and strong emphasis. Other
   Markdown remains editable and visible as source.
 - Automated tests cover source preservation, selection-driven syntax reveal,
-  Unicode edits, undo/redo, and mode switching. Real Vietnamese IME composition
-  still requires a visible Windows smoke test.
+  Unicode edits, undo/redo, and mode switching. A visible Windows/Tauri smoke
+  now also covers real Vietnamese Telex composition, selection reveal,
+  Source/Live mode switching, typing, undo/redo, safe-save, large-note fallback,
+  and dirty/external conflict handling.
 
 ## Spike evidence and disposition
 
@@ -71,5 +73,12 @@ so it must not block interactive startup. The provisional 512 KiB soft limit is
 intentionally below the 728 KiB fixture where initial parse p99 reached 261.50
 ms. It must be recalibrated with visible DOM/cold-start measurements rather than
 treated as a permanent format limit. Viewport/incremental decoration work as
-syntax coverage grows and a visible Vietnamese IME smoke test remain required
-before production approval.
+syntax coverage grows remains required before production approval.
+
+The visible Windows run on 2026-09-01 measured a 22-character WebView2/UI
+Automation round trip at p50 27.74 ms, p95 49.87 ms, and max 52.36 ms. It also
+observed real `Tieengs Vieetj` → `Tiếng Việt` composition and a 543,172-byte note
+falling back to Source mode in 197.71 ms. These numbers include automation
+overhead and do not replace browser event-to-paint profiling. Full method,
+conflict evidence, and remaining gaps are recorded in
+`docs/benchmarks/windows-editor-native-smoke.md`.

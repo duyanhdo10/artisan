@@ -12,6 +12,10 @@ import {
   type AutosaveSaveState,
 } from "./editor/autosavePolicy";
 import {
+  decideWindowClose,
+  type WindowCloseContext,
+} from "./editor/closePolicy";
+import {
   formatNoteSize,
   getNoteSizePolicy,
 } from "./editor/noteSizePolicy";
@@ -70,6 +74,15 @@ function App() {
   const expectedRecoveryHashRef = useRef<string | null>(null);
   const allowWindowCloseRef = useRef(false);
   const closeAfterSaveRef = useRef(false);
+  const closeContextRef = useRef<WindowCloseContext>({
+    isDirty: false,
+    isBusy: false,
+    hasMixedLineEndings: false,
+    saveState: "idle",
+  });
+  const saveForCloseRef = useRef<() => Promise<boolean>>(() =>
+    Promise.resolve(false),
+  );
   const vaultRef = useRef<VaultSummary | null>(null);
   const activeNoteRef = useRef<OpenedNote | null>(null);
   const draftRef = useRef("");
@@ -86,6 +99,12 @@ function App() {
   activeNoteRef.current = activeNote;
   draftRef.current = draft;
   editorRevisionRef.current = editorRevision;
+  closeContextRef.current = {
+    isDirty,
+    isBusy: busy,
+    hasMixedLineEndings: activeNote?.lineEnding === "mixed",
+    saveState,
+  };
 
   useEffect(() => {
     let active = true;
@@ -388,6 +407,8 @@ function App() {
       return false;
     }
   }, [activeNote, busy, draft, isDirty, saveState]);
+
+  saveForCloseRef.current = handleSave;
 
   async function handleReload() {
     if (!activeNote || busy) return;
@@ -703,29 +724,18 @@ function App() {
     getCurrentWindow()
       .onCloseRequested((event) => {
         if (allowWindowCloseRef.current) return;
-        if (
-          isDirty &&
-          (busy ||
-            activeNote?.lineEnding === "mixed" ||
-            saveState === "conflict")
-        ) {
-          event.preventDefault();
-          setOperationError(
-            saveState === "conflict"
-              ? "Resolve the external conflict before closing Astian."
-              : "The modified note could not be flushed before closing Astian.",
-          );
-          return;
-        }
-        if (isDirty || saveState === "saving" || saveState === "queued") {
-          event.preventDefault();
-          closeAfterSaveRef.current = true;
-          setOperationError("Saving the modified note before closing Astian…");
-          if (saveState !== "saving") {
-            void handleSave().then((saved) => {
-              if (!saved) closeAfterSaveRef.current = false;
-            });
-          }
+        const decision = decideWindowClose(closeContextRef.current);
+        if (decision.kind === "allow") return;
+
+        event.preventDefault();
+        setOperationError(decision.message);
+        if (decision.kind === "block") return;
+
+        closeAfterSaveRef.current = true;
+        if (decision.shouldStartSave) {
+          void saveForCloseRef.current().then((saved) => {
+            if (!saved) closeAfterSaveRef.current = false;
+          });
         }
       })
       .then((stopListening) => {
@@ -740,7 +750,7 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [activeNote?.lineEnding, busy, handleSave, isDirty, saveState]);
+  }, []);
 
   useEffect(() => {
     if (
