@@ -6,6 +6,12 @@ import {
   type MarkdownEditorMode,
 } from "./editor/MarkdownEditor";
 import {
+  AUTOSAVE_DEBOUNCE_MS,
+  saveAfterRecoveryQueue,
+  shouldQueueAutosave,
+  type AutosaveSaveState,
+} from "./editor/autosavePolicy";
+import {
   formatNoteSize,
   getNoteSizePolicy,
 } from "./editor/noteSizePolicy";
@@ -29,7 +35,7 @@ import {
   type VaultSummary,
 } from "./lib/tauri";
 
-type SaveState = "idle" | "saving" | "failed" | "conflict";
+type SaveState = AutosaveSaveState;
 type RecoveryState = "idle" | "pending" | "writing" | "protected" | "failed";
 
 const RECOVERY_DEBOUNCE_MS = 600;
@@ -57,6 +63,8 @@ function App() {
     useState<MarkdownEditorMode>("live-preview");
   const recoveryWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const expectedRecoveryHashRef = useRef<string | null>(null);
+  const allowWindowCloseRef = useRef(false);
+  const closeAfterSaveRef = useRef(false);
   const isDirty = activeNote !== null && draft !== activeNote.content;
   const noteSizePolicy = getNoteSizePolicy(draft);
   const livePreviewLimited =
@@ -81,8 +89,8 @@ function App() {
 
   async function handleSelectVault() {
     if (isDirty) {
-      setOperationError("Save or reload the modified note before changing vaults.");
-      return;
+      const saved = await handleSave();
+      if (!saved) return;
     }
 
     setBusy(true);
@@ -124,15 +132,15 @@ function App() {
 
   async function handleOpenNote(relativePath: string) {
     if (relativePath === activeNote?.relativePath) return;
-    if (isDirty) {
-      setOperationError("Save or reload the modified note before opening another note.");
-      return;
-    }
     if (recoveryDrafts.some((recovery) => recovery.relativePath === relativePath)) {
       setOperationError(
         "Restore or discard this note's recovery draft before opening it.",
       );
       return;
+    }
+    if (isDirty) {
+      const saved = await handleSave();
+      if (!saved) return;
     }
 
     setBusy(true);
@@ -153,14 +161,15 @@ function App() {
     }
   }
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (): Promise<boolean> => {
+    if (!activeNote || !isDirty) return true;
     if (
-      !activeNote ||
-      !isDirty ||
+      busy ||
+      activeNote.lineEnding === "mixed" ||
       saveState === "saving" ||
       saveState === "conflict"
     ) {
-      return;
+      return false;
     }
 
     const notePath = activeNote.relativePath;
@@ -186,14 +195,17 @@ function App() {
         current.filter((recovery) => recovery.relativePath !== notePath),
       );
       expectedRecoveryHashRef.current = null;
+      return true;
     } catch (error: unknown) {
       const commandError = normalizeCommandError(error);
+      closeAfterSaveRef.current = false;
       setSaveState(
         commandError.code === "external_change_conflict" ? "conflict" : "failed",
       );
       setOperationError(commandError.message);
+      return false;
     }
-  }, [activeNote, draft, isDirty, saveState]);
+  }, [activeNote, busy, draft, isDirty, saveState]);
 
   async function handleReload() {
     if (!activeNote || busy) return;
@@ -220,6 +232,8 @@ function App() {
   }
 
   useEffect(() => {
+    let blurTimer: number | undefined;
+
     function handleKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -227,8 +241,17 @@ function App() {
       }
     }
 
+    function handleWindowBlur() {
+      blurTimer = window.setTimeout(() => void handleSave(), 0);
+    }
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("blur", handleWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("blur", handleWindowBlur);
+      if (blurTimer !== undefined) window.clearTimeout(blurTimer);
+    };
   }, [handleSave]);
 
   async function handleRestoreRecovery(summary: RecoveryDraftSummary) {
@@ -450,18 +473,67 @@ function App() {
   }, [activeNote, draft, editorRevision, isDirty]);
 
   useEffect(() => {
+    const shouldQueue = shouldQueueAutosave({
+      hasActiveNote: activeNote !== null,
+      isDirty,
+      isBusy: busy,
+      hasMixedLineEndings: activeNote?.lineEnding === "mixed",
+      saveState,
+    });
+    if (!shouldQueue) {
+      if (saveState === "queued") setSaveState("idle");
+      return;
+    }
+    if (saveState === "idle") {
+      setSaveState("queued");
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void saveAfterRecoveryQueue(
+        recoveryWriteQueueRef.current,
+        () => cancelled,
+        handleSave,
+      );
+    }, AUTOSAVE_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeNote, busy, draft, editorRevision, handleSave, isDirty, saveState]);
+
+  useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
     getCurrentWindow()
       .onCloseRequested((event) => {
-        if (isDirty || saveState === "saving") {
+        if (allowWindowCloseRef.current) return;
+        if (
+          isDirty &&
+          (busy ||
+            activeNote?.lineEnding === "mixed" ||
+            saveState === "conflict")
+        ) {
           event.preventDefault();
           setOperationError(
-            saveState === "saving"
-              ? "Wait for the current save to finish before closing Astian."
-              : "Save or reload the modified note before closing Astian.",
+            saveState === "conflict"
+              ? "Resolve the external conflict before closing Astian."
+              : "The modified note could not be flushed before closing Astian.",
           );
+          return;
+        }
+        if (isDirty || saveState === "saving" || saveState === "queued") {
+          event.preventDefault();
+          closeAfterSaveRef.current = true;
+          setOperationError("Saving the modified note before closing Astian…");
+          if (saveState !== "saving") {
+            void handleSave().then((saved) => {
+              if (!saved) closeAfterSaveRef.current = false;
+            });
+          }
         }
       })
       .then((stopListening) => {
@@ -476,12 +548,33 @@ function App() {
       disposed = true;
       unlisten?.();
     };
+  }, [activeNote?.lineEnding, busy, handleSave, isDirty, saveState]);
+
+  useEffect(() => {
+    if (
+      !closeAfterSaveRef.current ||
+      isDirty ||
+      saveState !== "idle"
+    ) {
+      return;
+    }
+
+    closeAfterSaveRef.current = false;
+    allowWindowCloseRef.current = true;
+    getCurrentWindow()
+      .close()
+      .catch(() => {
+        allowWindowCloseRef.current = false;
+        setOperationError("Astian could not close the native window.");
+      });
   }, [isDirty, saveState]);
 
   const isMixedLineEnding = activeNote?.lineEnding === "mixed";
   const saveLabel =
     saveState === "saving"
       ? "Saving…"
+      : saveState === "queued"
+        ? "Autosave queued"
       : saveState === "conflict"
         ? "External conflict"
         : saveState === "failed"
@@ -509,6 +602,7 @@ function App() {
   const handleDraftChange = useCallback((value: string) => {
     setDraft(value);
     setEditorRevision((revision) => revision + 1);
+    setSaveState((current) => (current === "failed" ? "idle" : current));
   }, []);
 
   return (
@@ -657,6 +751,8 @@ function App() {
             </div>
             <div className="save-controls">
               <span
+                role="status"
+                aria-live="polite"
                 className={
                   saveState === "conflict" || saveState === "failed" || isDirty
                     ? "save-state warning"
@@ -697,6 +793,7 @@ function App() {
                 onClick={handleSave}
                 disabled={
                   !isDirty ||
+                  busy ||
                   isMixedLineEnding ||
                   saveState === "saving" ||
                   saveState === "conflict"

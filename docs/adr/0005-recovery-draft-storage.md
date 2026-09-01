@@ -45,6 +45,13 @@ layout is:
   write coordinator.
 - A dirty editor revision is not considered recovery-protected until the Rust
   command confirms the durable draft write.
+- Recovery debounce starts at 600 ms and autosave starts at 700 ms after the
+  latest edit. Before autosave calls safe-save, it awaits the serialized
+  recovery queue so a slow recovery write cannot arrive after save and recreate
+  stale dirty data. A cancelled debounce never saves its captured revision.
+- Explicit flushes (`Ctrl+S`, window blur, note/vault transition, and close)
+  bypass the autosave timer. Close remains intercepted until the flush succeeds;
+  save failure or conflict keeps the app open and the editor dirty.
 - Creating a draft uses no-clobber semantics. Replacing one requires the caller
   to provide its last confirmed `content_hash`; a missing or mismatched hash
   refuses the write so an unreviewed draft from an earlier session cannot be
