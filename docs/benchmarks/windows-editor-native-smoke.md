@@ -121,6 +121,24 @@ state refs. A rebuilt release binary then passed both native paths:
 The dirty-close test deliberately beat the 700 ms autosave debounce, so the
 write was caused by the close guard rather than ordinary autosave.
 
+### On-demand editor bundle follow-up
+
+The production build now defers CodeMirror until a note is opened instead of
+including the editor in the initial application chunk:
+
+- initial JavaScript: 228.17 kB, 70.34 kB gzip (previously 543.62 kB,
+  174.21 kB gzip);
+- on-demand `MarkdownEditor` chunk: 315.79 kB, 103.62 kB gzip;
+- no generated JavaScript chunk exceeds Vite's 500 kB warning threshold;
+- the Tauri release and NSIS bundle completed with the split assets;
+- a packaged release smoke opened a disposable note, exposed the CodeMirror
+  `Markdown source` accessibility control, and returned the exact fixture text.
+
+The release smoke also exited in 98.72 ms when sent the native Windows system
+close command. Coordinate-based automation missed the non-client close target
+in this follow-up, so it is not reported as another real title-bar click; the
+earlier clean and dirty real-click results remain the close evidence.
+
 ## Remaining gaps
 
 - Browser-based `PerformanceObserver`/event-to-paint instrumentation was not

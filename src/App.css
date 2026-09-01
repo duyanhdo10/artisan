@@ -291,6 +291,12 @@ small,
   line-height: 1.8;
 }
 
+.editor-loading,
+.editor-placeholder {
+  padding: 54px clamp(38px, 8vw, 110px);
+  color: #667b7d;
+}
+
 .markdown-editor .cm-editor { height: 100%; background: transparent; }
 .markdown-editor .cm-editor.cm-focused { outline: none; }
 .markdown-editor .cm-scroller {

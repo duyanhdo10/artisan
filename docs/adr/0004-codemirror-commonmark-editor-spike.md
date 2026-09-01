@@ -82,3 +82,9 @@ falling back to Source mode in 197.71 ms. These numbers include automation
 overhead and do not replace browser event-to-paint profiling. Full method,
 conflict evidence, and remaining gaps are recorded in
 `docs/benchmarks/windows-editor-native-smoke.md`.
+
+A follow-up production build defers the CodeMirror component until a note is
+opened. This reduced the initial JavaScript chunk from 543.62 kB (174.21 kB
+gzip) to 228.17 kB (70.34 kB gzip), with the 315.79 kB editor chunk loaded on
+demand. The release Tauri/NSIS build and a packaged-editor native smoke both
+passed, so the split does not depend on a development server.

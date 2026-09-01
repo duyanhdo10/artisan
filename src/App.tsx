@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
-import {
-  MarkdownEditor,
-  type MarkdownEditorMode,
-} from "./editor/MarkdownEditor";
+import type { MarkdownEditorMode } from "./editor/MarkdownEditor";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   saveAfterRecoveryQueue,
@@ -42,6 +46,12 @@ import {
   type VaultWatcherEvent,
   type VaultSummary,
 } from "./lib/tauri";
+
+const MarkdownEditor = lazy(() =>
+  import("./editor/MarkdownEditor").then((module) => ({
+    default: module.MarkdownEditor,
+  })),
+);
 
 type SaveState = AutosaveSaveState;
 type RecoveryState = "idle" | "pending" | "writing" | "protected" | "failed";
@@ -1083,15 +1093,34 @@ function App() {
             </div>
           ) : null}
           {operationError ? <div className="error-banner" role="alert">{operationError}</div> : null}
-          <MarkdownEditor
-            key={activeNote?.relativePath ?? "no-note"}
-            ariaLabel="Markdown source"
-            value={draft}
-            onChange={handleDraftChange}
-            mode={effectiveEditorMode}
-            disabled={activeNote === null}
-            readOnly={isMixedLineEnding}
-          />
+          {activeNote ? (
+            <Suspense
+              fallback={
+                <div className="markdown-editor editor-loading" role="status">
+                  Loading editor…
+                </div>
+              }
+            >
+              <MarkdownEditor
+                key={activeNote.relativePath}
+                ariaLabel="Markdown source"
+                value={draft}
+                onChange={handleDraftChange}
+                mode={effectiveEditorMode}
+                readOnly={isMixedLineEnding}
+              />
+            </Suspense>
+          ) : (
+            <div
+              aria-label="Markdown source"
+              aria-multiline="true"
+              aria-readonly="true"
+              className="markdown-editor editor-placeholder"
+              role="textbox"
+            >
+              Select a Markdown note from the file list.
+            </div>
+          )}
         </section>
       </main>
 
