@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "benchmark:editor": "vitest bench --run src/editor/markdownPreview.bench.ts",
+    "benchmark:search": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin fts_benchmark",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "preview": "vite preview",

@@ -1,4 +1,5 @@
 mod recovery;
+pub mod search_index;
 mod watcher;
 
 use recovery::{RecoveryDraft, RecoveryDraftListItem, RecoveryDraftSummary};
