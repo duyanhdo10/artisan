@@ -1,3 +1,5 @@
+//! Reproducible release-profile benchmark for the disposable FTS5 index.
+
 use astian_lib::search_index::{IndexDocument, SearchIndex};
 use std::{fs, time::Instant};
 

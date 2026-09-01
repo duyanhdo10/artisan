@@ -45,3 +45,7 @@ the exact root guard.
   unmerged integration behavior is authorized or proven by this status spike.
 - Git executable discovery currently relies on `PATH`; settings/discovery UI and
   version capability policy remain Version 0.5 work.
+
+A post-installer-fix verification run from Cargo `examples` also passed with
+root verification plus status at `133.663 ms`; all correctness flags remained
+true.

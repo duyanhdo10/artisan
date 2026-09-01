@@ -1,3 +1,5 @@
+//! Windows correctness fixture for direct Git porcelain v2 status inspection.
+
 use astian_lib::git_status::{GitClient, GitEntryKind, GitStatusError};
 use std::{
     fs,

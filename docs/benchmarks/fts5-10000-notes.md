@@ -51,3 +51,8 @@ update p95 is about 9× below the 500 ms budget.
   identity, watcher-driven incremental scheduling, corruption replacement, and
   a 10,000-file end-to-end benchmark from disk.
 - Benchmark numbers are local reference evidence, not a cross-machine guarantee.
+
+A post-installer-fix verification run from Cargo `examples` also passed, with
+warm search p95 `38.235 ms` and incremental update p95 `82.745 ms`. Initial
+rebuild varied to `6,010.68 ms`, reinforcing that rebuild belongs in a
+background pipeline; both interactive budgets remained comfortably satisfied.

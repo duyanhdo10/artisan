@@ -4,6 +4,7 @@ version = "0.0.1"
 description = "A local-first Markdown note-taking app for Windows"
 authors = ["Astian contributors"]
 edition = "2021"
+default-run = "astian"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
