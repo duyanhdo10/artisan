@@ -1,3 +1,4 @@
+pub mod git_status;
 mod recovery;
 pub mod search_index;
 mod watcher;
