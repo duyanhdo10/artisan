@@ -10,6 +10,7 @@ import {
   normalizeCommandError,
   readRecoveryDraft,
   reconcileVault,
+  restoreLastVault,
   saveNote,
   saveNoteAsCopy,
   writeRecoveryDraft,
@@ -76,6 +77,14 @@ describe("saveNote", () => {
 });
 
 describe("vault watcher IPC", () => {
+  it("restores the last vault without exposing or sending an absolute path", async () => {
+    const summary = { name: "Notes", notes: [], vaultSession: 3 };
+    vi.mocked(invoke).mockResolvedValue(summary);
+
+    await expect(restoreLastVault()).resolves.toEqual(summary);
+    expect(invoke).toHaveBeenCalledWith("restore_last_vault");
+  });
+
   it("requests reconciliation without sending a vault path", async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
 

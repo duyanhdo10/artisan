@@ -35,6 +35,7 @@ import {
   openNote,
   readRecoveryDraft,
   reconcileVault,
+  restoreLastVault,
   saveNote,
   saveNoteAsCopy,
   selectVault,
@@ -120,8 +121,18 @@ function App() {
     let active = true;
 
     getRuntimeInfo()
-      .then((info) => {
-        if (active) setRuntime(info);
+      .then(async (info) => {
+        if (!active) return;
+        setRuntime(info);
+        setBusy(true);
+        try {
+          const restoredVault = await restoreLastVault();
+          if (active && restoredVault) await applyVault(restoredVault);
+        } catch (error: unknown) {
+          if (active) setOperationError(normalizeCommandError(error).message);
+        } finally {
+          if (active) setBusy(false);
+        }
       })
       .catch((error: unknown) => {
         if (active) setRuntimeError(normalizeCommandError(error).message);
@@ -131,6 +142,40 @@ function App() {
       active = false;
     };
   }, []);
+
+  async function applyVault(nextVault: VaultSummary) {
+    vaultRef.current = nextVault;
+    activeNoteRef.current = null;
+    draftRef.current = "";
+    editorRevisionRef.current = 0;
+    lastWatcherEventRef.current = {
+      vaultSession: nextVault.vaultSession,
+      revision: 0,
+    };
+    setVault(nextVault);
+    setActiveNote(null);
+    setDraft("");
+    setSaveState("idle");
+    setRecoveryState("idle");
+    setRecoveryDrafts([]);
+    setUnavailableRecoveryDrafts([]);
+    setRecoveryNotice(null);
+    setPendingRecoveryDeleteId(null);
+    setEditorRevision(0);
+    expectedRecoveryHashRef.current = null;
+    const recoveryItems = await listRecoveryDrafts();
+    setRecoveryDrafts(
+      recoveryItems.flatMap((item) =>
+        item.status === "available" ? [item.draft] : [],
+      ),
+    );
+    setUnavailableRecoveryDrafts(
+      recoveryItems.filter(
+        (item): item is UnavailableRecoveryDraft => item.status === "unavailable",
+      ),
+    );
+    await reconcileVault();
+  }
 
   useEffect(() => {
     let disposed = false;
@@ -289,38 +334,7 @@ function App() {
     try {
       const selectedVault = await selectVault();
       if (selectedVault) {
-        vaultRef.current = selectedVault;
-        activeNoteRef.current = null;
-        draftRef.current = "";
-        editorRevisionRef.current = 0;
-        lastWatcherEventRef.current = {
-          vaultSession: selectedVault.vaultSession,
-          revision: 0,
-        };
-        setVault(selectedVault);
-        setActiveNote(null);
-        setDraft("");
-        setSaveState("idle");
-        setRecoveryState("idle");
-        setRecoveryDrafts([]);
-        setUnavailableRecoveryDrafts([]);
-        setRecoveryNotice(null);
-        setPendingRecoveryDeleteId(null);
-        setEditorRevision(0);
-        expectedRecoveryHashRef.current = null;
-        const recoveryItems = await listRecoveryDrafts();
-        setRecoveryDrafts(
-          recoveryItems.flatMap((item) =>
-            item.status === "available" ? [item.draft] : [],
-          ),
-        );
-        setUnavailableRecoveryDrafts(
-          recoveryItems.filter(
-            (item): item is UnavailableRecoveryDraft =>
-              item.status === "unavailable",
-          ),
-        );
-        await reconcileVault();
+        await applyVault(selectedVault);
       }
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);

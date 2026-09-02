@@ -106,6 +106,10 @@ export function selectVault(): Promise<VaultSummary | null> {
   return invoke<VaultSummary | null>("select_vault");
 }
 
+export function restoreLastVault(): Promise<VaultSummary | null> {
+  return invoke<VaultSummary | null>("restore_last_vault");
+}
+
 export function reconcileVault(): Promise<void> {
   return invoke<void>("reconcile_vault");
 }

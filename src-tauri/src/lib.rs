@@ -1,6 +1,7 @@
 pub mod git_status;
 mod recovery;
 pub mod search_index;
+mod settings;
 mod watcher;
 
 use recovery::{RecoveryDraft, RecoveryDraftListItem, RecoveryDraftSummary};
@@ -114,6 +115,7 @@ pub struct SaveResult {
 struct VaultState {
     root: Mutex<Option<PathBuf>>,
     write_lock: Arc<Mutex<()>>,
+    settings_lock: Mutex<()>,
     watcher: Mutex<Option<watcher::VaultWatcher>>,
     expected_writes: Mutex<watcher::ExpectedWrites>,
     next_vault_session: AtomicU64,
@@ -154,6 +156,47 @@ async fn select_vault(
         ));
     }
 
+    activate_vault(&app, &state, root, true).map(Some)
+}
+
+#[tauri::command]
+async fn restore_last_vault(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VaultState>,
+) -> Result<Option<VaultSummary>, CommandError> {
+    let app_local_data_root = settings_local_data_root(&app)?;
+    let stored_root = {
+        let _settings_guard = state
+            .settings_lock
+            .lock()
+            .map_err(|_| CommandError::internal())?;
+        settings::last_vault(&app_local_data_root)?
+    };
+    let Some(stored_root) = stored_root else {
+        return Ok(None);
+    };
+    let root = fs::canonicalize(stored_root).map_err(|_| {
+        CommandError::new(
+            "recent_vault_unavailable",
+            "The most recent vault is unavailable. Choose a vault to continue.",
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(CommandError::new(
+            "recent_vault_unavailable",
+            "The most recent vault is unavailable. Choose a vault to continue.",
+        ));
+    }
+
+    activate_vault(&app, &state, root, false).map(Some)
+}
+
+fn activate_vault(
+    app: &tauri::AppHandle,
+    state: &VaultState,
+    root: PathBuf,
+    remember: bool,
+) -> Result<VaultSummary, CommandError> {
     let notes = list_markdown_notes(&root)?;
     let name = root
         .file_name()
@@ -167,12 +210,21 @@ async fn select_vault(
         .saturating_add(1);
     let expected_writes = Arc::new(Mutex::new(HashMap::new()));
     let next_watcher = watcher::start_vault_watcher(
-        app,
+        app.clone(),
         root.clone(),
         vault_session,
         Arc::clone(&expected_writes),
         Arc::clone(&state.write_lock),
     )?;
+
+    if remember {
+        let app_local_data_root = settings_local_data_root(app)?;
+        let _settings_guard = state
+            .settings_lock
+            .lock()
+            .map_err(|_| CommandError::internal())?;
+        settings::remember_vault(&app_local_data_root, &root)?;
+    }
 
     *state.watcher.lock().map_err(|_| CommandError::internal())? = Some(next_watcher);
     *state
@@ -181,11 +233,11 @@ async fn select_vault(
         .map_err(|_| CommandError::internal())? = expected_writes;
     *state.root.lock().map_err(|_| CommandError::internal())? = Some(root);
 
-    Ok(Some(VaultSummary {
+    Ok(VaultSummary {
         name,
         notes,
         vault_session,
-    }))
+    })
 }
 
 #[tauri::command]
@@ -478,6 +530,15 @@ fn app_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> 
         CommandError::new(
             "recovery_location_unavailable",
             "The recovery draft location is unavailable.",
+        )
+    })
+}
+
+fn settings_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    app.path().app_local_data_dir().map_err(|_| {
+        CommandError::new(
+            "settings_location_unavailable",
+            "The Astian settings location is unavailable.",
         )
     })
 }
@@ -1162,6 +1223,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
             select_vault,
+            restore_last_vault,
             reconcile_vault,
             open_note,
             save_note,
