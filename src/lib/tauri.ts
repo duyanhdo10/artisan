@@ -25,6 +25,10 @@ export interface VaultSummary {
   vaultSession: number;
 }
 
+export interface CreatedFolder {
+  relativePath: string;
+}
+
 export interface RecentVault {
   id: string;
   name: string;
@@ -157,6 +161,16 @@ export function createNote(
   fileName: string,
 ): Promise<OpenedNote> {
   return invoke<OpenedNote>("create_note", { parentRelativePath, fileName });
+}
+
+export function createFolder(
+  parentRelativePath: string,
+  folderName: string,
+): Promise<CreatedFolder> {
+  return invoke<CreatedFolder>("create_folder", {
+    parentRelativePath,
+    folderName,
+  });
 }
 
 export function saveNote(

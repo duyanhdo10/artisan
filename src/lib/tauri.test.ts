@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearRecoveryDraft,
+  createFolder,
   createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
@@ -97,6 +98,19 @@ describe("createNote", () => {
     expect(invoke).toHaveBeenCalledWith("create_note", {
       parentRelativePath: "",
       fileName: "Kế hoạch",
+    });
+  });
+});
+
+describe("createFolder", () => {
+  it("forwards only a parent-relative path and one folder segment", async () => {
+    const created = { relativePath: "Projects/Kế hoạch" };
+    vi.mocked(invoke).mockResolvedValue(created);
+
+    await expect(createFolder("Projects", "Kế hoạch")).resolves.toEqual(created);
+    expect(invoke).toHaveBeenCalledWith("create_folder", {
+      parentRelativePath: "Projects",
+      folderName: "Kế hoạch",
     });
   });
 });

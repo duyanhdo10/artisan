@@ -81,6 +81,12 @@ pub struct VaultSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreatedFolder {
+    relative_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenedNote {
     relative_path: String,
     content: String,
@@ -408,6 +414,30 @@ async fn create_note(
             &created.content_hash,
         );
         Ok(created)
+    })
+    .await
+    .map_err(|_| CommandError::internal())??;
+
+    if let Ok(watcher) = state.watcher.lock() {
+        if let Some(watcher) = watcher.as_ref() {
+            let _ = watcher.request_reconcile();
+        }
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+async fn create_folder(
+    parent_relative_path: String,
+    folder_name: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<CreatedFolder, CommandError> {
+    let root = current_vault_root(&state)?;
+    let write_lock = Arc::clone(&state.write_lock);
+
+    let created = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        vault_name::create_folder(&root, &parent_relative_path, &folder_name)
     })
     .await
     .map_err(|_| CommandError::internal())??;
@@ -1363,6 +1393,7 @@ pub fn run() {
             restore_active_note,
             remember_active_note,
             create_note,
+            create_folder,
             save_note,
             write_recovery_draft,
             list_recovery_drafts,
