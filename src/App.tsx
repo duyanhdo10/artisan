@@ -39,6 +39,8 @@ import {
   openRecentVault,
   readRecoveryDraft,
   reconcileVault,
+  rememberActiveNote,
+  restoreActiveNote,
   restoreLastVault,
   saveNote,
   saveNoteAsCopy,
@@ -180,17 +182,41 @@ function App() {
     setEditorRevision(0);
     expectedRecoveryHashRef.current = null;
     const recoveryItems = await listRecoveryDrafts();
-    setRecoveryDrafts(
-      recoveryItems.flatMap((item) =>
-        item.status === "available" ? [item.draft] : [],
-      ),
+    const availableDrafts = recoveryItems.flatMap((item) =>
+      item.status === "available" ? [item.draft] : [],
     );
-    setUnavailableRecoveryDrafts(
-      recoveryItems.filter(
-        (item): item is UnavailableRecoveryDraft => item.status === "unavailable",
-      ),
+    const unavailableDrafts = recoveryItems.filter(
+      (item): item is UnavailableRecoveryDraft => item.status === "unavailable",
     );
+    setRecoveryDrafts(availableDrafts);
+    setUnavailableRecoveryDrafts(unavailableDrafts);
+    const restoredNote = await restoreActiveNote();
+    if (
+      restoredNote &&
+      !availableDrafts.some(
+        (draftSummary) => draftSummary.relativePath === restoredNote.relativePath,
+      )
+    ) {
+      activeNoteRef.current = restoredNote;
+      draftRef.current = restoredNote.content;
+      setActiveNote(restoredNote);
+      setDraft(restoredNote.content);
+    } else if (restoredNote) {
+      setRecoveryNotice(
+        "The last active note has a recovery draft. Review it before opening the note.",
+      );
+    }
     await reconcileVault();
+  }
+
+  async function persistActiveNote(relativePath: string | null) {
+    try {
+      await rememberActiveNote(relativePath);
+    } catch (error: unknown) {
+      setOperationError(
+        `The note is available, but session state was not updated. ${normalizeCommandError(error).message}`,
+      );
+    }
   }
 
   useEffect(() => {
@@ -258,6 +284,7 @@ function App() {
         expectedRecoveryHashRef.current = null;
         setOperationError(null);
         setWatcherNotice("The active note was deleted outside Astian.");
+        void persistActiveNote(null);
         return;
       }
 
@@ -295,6 +322,7 @@ function App() {
         setRecoveryState("idle");
         expectedRecoveryHashRef.current = null;
         setOperationError(null);
+        await persistActiveNote(reloaded.relativePath);
         setWatcherNotice(
           action.relativePath === observedPath
             ? "The active note was reloaded after an external change."
@@ -428,6 +456,7 @@ function App() {
       setRecoveryState("idle");
       setEditorRevision(0);
       expectedRecoveryHashRef.current = null;
+      await persistActiveNote(note.relativePath);
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -476,6 +505,7 @@ function App() {
       expectedRecoveryHashRef.current = null;
       setNewNoteName("");
       setIsCreatingNote(false);
+      await persistActiveNote(note.relativePath);
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -559,6 +589,7 @@ function App() {
       setRecoveryState("idle");
       setEditorRevision(0);
       expectedRecoveryHashRef.current = null;
+      await persistActiveNote(note.relativePath);
     } catch (error: unknown) {
       setSaveState("failed");
       setOperationError(normalizeCommandError(error).message);
@@ -606,6 +637,7 @@ function App() {
       setActiveNote(note);
       setDraft(recovery.content);
       setEditorRevision(recovery.editorRevision);
+      await persistActiveNote(note.relativePath);
       if (note.content === recovery.content) {
         await clearRecoveryDraft(summary.relativePath);
         expectedRecoveryHashRef.current = null;
@@ -677,6 +709,7 @@ function App() {
       setSaveState("idle");
       setRecoveryState("idle");
       expectedRecoveryHashRef.current = null;
+      await persistActiveNote(copied.relativePath);
       setRecoveryDrafts((current) =>
         current.filter(
           (draftSummary) => draftSummary.relativePath !== sourceRelativePath,

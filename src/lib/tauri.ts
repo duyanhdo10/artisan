@@ -144,6 +144,14 @@ export function openNote(relativePath: string): Promise<OpenedNote> {
   return invoke<OpenedNote>("open_note", { relativePath });
 }
 
+export function restoreActiveNote(): Promise<OpenedNote | null> {
+  return invoke<OpenedNote | null>("restore_active_note");
+}
+
+export function rememberActiveNote(relativePath: string | null): Promise<void> {
+  return invoke<void>("remember_active_note", { relativePath });
+}
+
 export function createNote(
   parentRelativePath: string,
   fileName: string,

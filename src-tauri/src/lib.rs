@@ -1,6 +1,7 @@
 pub mod git_status;
 mod recovery;
 pub mod search_index;
+mod session;
 mod settings;
 mod vault_name;
 mod watcher;
@@ -117,6 +118,7 @@ struct VaultState {
     root: Mutex<Option<PathBuf>>,
     write_lock: Arc<Mutex<()>>,
     settings_lock: Mutex<()>,
+    session_lock: Mutex<()>,
     watcher: Mutex<Option<watcher::VaultWatcher>>,
     expected_writes: Mutex<watcher::ExpectedWrites>,
     next_vault_session: AtomicU64,
@@ -298,6 +300,48 @@ fn open_note(
         .ok_or_else(|| CommandError::new("vault_not_open", "Open a vault first."))?;
 
     read_markdown_note(&root, &relative_path)
+}
+
+#[tauri::command]
+fn restore_active_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VaultState>,
+) -> Result<Option<OpenedNote>, CommandError> {
+    let root = current_vault_root(&state)?;
+    let app_local_data_root = session_local_data_root(&app)?;
+    let relative_path = {
+        let _session_guard = state
+            .session_lock
+            .lock()
+            .map_err(|_| CommandError::internal())?;
+        session::active_note(&app_local_data_root, &root)?
+    };
+    let Some(relative_path) = relative_path else {
+        return Ok(None);
+    };
+    match read_markdown_note(&root, &relative_path) {
+        Ok(note) => Ok(Some(note)),
+        Err(error) if error.code == "note_unavailable" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+fn remember_active_note(
+    app: tauri::AppHandle,
+    relative_path: Option<String>,
+    state: tauri::State<'_, VaultState>,
+) -> Result<(), CommandError> {
+    let root = current_vault_root(&state)?;
+    if let Some(relative_path) = relative_path.as_deref() {
+        read_markdown_note(&root, relative_path)?;
+    }
+    let app_local_data_root = session_local_data_root(&app)?;
+    let _session_guard = state
+        .session_lock
+        .lock()
+        .map_err(|_| CommandError::internal())?;
+    session::remember_active_note(&app_local_data_root, &root, relative_path.as_deref())
 }
 
 #[tauri::command]
@@ -617,6 +661,15 @@ fn settings_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandEr
         CommandError::new(
             "settings_location_unavailable",
             "The Astian settings location is unavailable.",
+        )
+    })
+}
+
+fn session_local_data_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+    app.path().app_local_data_dir().map_err(|_| {
+        CommandError::new(
+            "session_location_unavailable",
+            "The Astian session location is unavailable.",
         )
     })
 }
@@ -1307,6 +1360,8 @@ pub fn run() {
             forget_recent_vault,
             reconcile_vault,
             open_note,
+            restore_active_note,
+            remember_active_note,
             create_note,
             save_note,
             write_recovery_draft,

@@ -14,6 +14,8 @@ import {
   openRecentVault,
   readRecoveryDraft,
   reconcileVault,
+  rememberActiveNote,
+  restoreActiveNote,
   restoreLastVault,
   saveNote,
   saveNoteAsCopy,
@@ -95,6 +97,29 @@ describe("createNote", () => {
     expect(invoke).toHaveBeenCalledWith("create_note", {
       parentRelativePath: "",
       fileName: "Kế hoạch",
+    });
+  });
+});
+
+describe("active note session IPC", () => {
+  it("restores without sending a vault or note path", async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    await expect(restoreActiveNote()).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("restore_active_note");
+  });
+
+  it("remembers or clears only a relative active note path", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await rememberActiveNote("Dự án/Kế hoạch.md");
+    await rememberActiveNote(null);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "remember_active_note", {
+      relativePath: "Dự án/Kế hoạch.md",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "remember_active_note", {
+      relativePath: null,
     });
   });
 });
