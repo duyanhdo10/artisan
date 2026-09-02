@@ -140,7 +140,7 @@ describe("active note session IPC", () => {
 
 describe("vault watcher IPC", () => {
   it("restores the last vault without exposing or sending an absolute path", async () => {
-    const summary = { name: "Notes", notes: [], vaultSession: 3 };
+    const summary = { name: "Notes", folders: [], notes: [], vaultSession: 3 };
     vi.mocked(invoke).mockResolvedValue(summary);
 
     await expect(restoreLastVault()).resolves.toEqual(summary);
@@ -168,6 +168,7 @@ describe("vault watcher IPC", () => {
       status: "changed" as const,
       errorCode: null,
       changes: [],
+      folders: [{ relativePath: "Projects" }],
       notes: [],
     };
 
@@ -192,7 +193,12 @@ describe("recent vault IPC", () => {
 
   it("opens and forgets a recent vault only by opaque id", async () => {
     const id = "a".repeat(64);
-    const summary = { name: "Kho ghi chú", notes: [], vaultSession: 4 };
+    const summary = {
+      name: "Kho ghi chú",
+      folders: [],
+      notes: [],
+      vaultSession: 4,
+    };
     vi.mocked(invoke).mockResolvedValueOnce(summary).mockResolvedValueOnce(undefined);
 
     await expect(openRecentVault(id)).resolves.toEqual(summary);

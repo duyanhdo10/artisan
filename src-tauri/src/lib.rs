@@ -71,10 +71,17 @@ pub struct NoteEntry {
     title: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderEntry {
+    relative_path: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultSummary {
     name: String,
+    folders: Vec<FolderEntry>,
     notes: Vec<NoteEntry>,
     vault_session: u64,
 }
@@ -250,7 +257,7 @@ fn activate_vault(
     root: PathBuf,
     remember: bool,
 ) -> Result<VaultSummary, CommandError> {
-    let notes = list_markdown_notes(&root)?;
+    let (folders, notes) = list_vault_entries(&root)?;
     let name = root
         .file_name()
         .and_then(|value| value.to_str())
@@ -288,6 +295,7 @@ fn activate_vault(
 
     Ok(VaultSummary {
         name,
+        folders,
         notes,
         vault_session,
     })
@@ -1289,18 +1297,21 @@ fn platform_replace_file(target: &Path, replacement: &Path) -> io::Result<Replac
     })
 }
 
-fn list_markdown_notes(root: &Path) -> Result<Vec<NoteEntry>, CommandError> {
+fn list_vault_entries(root: &Path) -> Result<(Vec<FolderEntry>, Vec<NoteEntry>), CommandError> {
+    let mut folders = Vec::new();
     let mut notes = Vec::new();
     let mut visited = HashSet::new();
-    collect_markdown_notes(root, root, &mut visited, &mut notes)?;
+    collect_vault_entries(root, root, &mut visited, &mut folders, &mut notes)?;
+    folders.sort_by_cached_key(|folder| folder.relative_path.to_lowercase());
     notes.sort_by_cached_key(|note| note.relative_path.to_lowercase());
-    Ok(notes)
+    Ok((folders, notes))
 }
 
-fn collect_markdown_notes(
+fn collect_vault_entries(
     root: &Path,
     directory: &Path,
     visited: &mut HashSet<PathBuf>,
+    folders: &mut Vec<FolderEntry>,
     notes: &mut Vec<NoteEntry>,
 ) -> Result<(), CommandError> {
     let canonical_directory = fs::canonicalize(directory)
@@ -1325,7 +1336,26 @@ fn collect_markdown_notes(
         }
 
         if file_type.is_dir() {
-            collect_markdown_notes(root, &entry.path(), visited, notes)?;
+            let canonical_folder = fs::canonicalize(entry.path()).map_err(|_| {
+                CommandError::new("vault_read_failed", "The vault could not be read.")
+            })?;
+            if !canonical_folder.starts_with(root) {
+                continue;
+            }
+            let relative = canonical_folder
+                .strip_prefix(root)
+                .map_err(|_| CommandError::internal())?;
+            let relative_path = relative
+                .to_str()
+                .ok_or_else(|| {
+                    CommandError::new(
+                        "unsupported_folder_path",
+                        "A folder has a path that cannot be represented safely.",
+                    )
+                })?
+                .replace('\\', "/");
+            folders.push(FolderEntry { relative_path });
+            collect_vault_entries(root, &canonical_folder, visited, folders, notes)?;
             continue;
         }
 
@@ -1469,7 +1499,9 @@ mod tests {
             .expect("non-Markdown fixture should be written");
 
         let root = fs::canonicalize(temp.path()).expect("root should canonicalize");
-        let notes = list_markdown_notes(&root).expect("vault should scan");
+        let (folders, notes) = list_vault_entries(&root).expect("vault should scan");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].relative_path, "Dự án");
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].relative_path, "Dự án/Kế hoạch.MD");
 
@@ -1478,6 +1510,24 @@ mod tests {
         assert_eq!(opened.content_hash.len(), 64);
         assert_eq!(opened.line_ending, LineEnding::CrLf);
         assert!(opened.has_utf8_bom);
+    }
+
+    #[test]
+    fn vault_scan_keeps_empty_nested_folders() {
+        let (_temp, root) = canonical_temp_root();
+        fs::create_dir_all(root.join("Projects").join("Empty"))
+            .expect("empty nested folders should be created");
+
+        let (folders, notes) = list_vault_entries(&root).expect("vault should scan");
+
+        assert_eq!(
+            folders
+                .iter()
+                .map(|folder| folder.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Projects", "Projects/Empty"]
+        );
+        assert!(notes.is_empty());
     }
 
     #[test]

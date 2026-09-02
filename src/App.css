@@ -217,7 +217,8 @@ small,
 .new-note-form button:disabled { cursor: not-allowed; opacity: 0.45; }
 .note-list { overflow: auto; padding: 2px 0; }
 
-.note-item {
+.note-item,
+.folder-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -230,7 +231,10 @@ small,
   text-align: left;
 }
 
-.note-item span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-item { color: #b9d8d7; font-weight: 600; }
+.folder-item span:first-child { color: #21a5a3; font-size: 9px; }
+.note-item span:last-child,
+.folder-item span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .note-item:hover:not(:disabled) { color: #d7e3e3; background: #182528; }
 .note-item.active { color: #d7e3e3; background: #1c2c2f; }
 .note-item.active span:first-child { color: #21a5a3; }

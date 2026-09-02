@@ -26,6 +26,7 @@ import {
 import { decideActiveNoteWatcherAction } from "./editor/watcherPolicy";
 import {
   clearRecoveryDraft,
+  createFolder,
   createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
@@ -54,6 +55,7 @@ import {
   type VaultWatcherEvent,
   type VaultSummary,
 } from "./lib/tauri";
+import { buildVaultTreeRows } from "./vault/vaultTree";
 
 const MarkdownEditor = lazy(() =>
   import("./editor/MarkdownEditor").then((module) => ({
@@ -78,6 +80,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [isCreatingNote, setIsCreatingNote] = useState(false);
   const [newNoteName, setNewNoteName] = useState("");
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryDraftSummary[]>([]);
@@ -115,6 +119,9 @@ function App() {
   const livePreviewLimited =
     activeNote !== null && !noteSizePolicy.livePreviewAllowed;
   const effectiveEditorMode = livePreviewLimited ? "source" : editorMode;
+  const vaultTreeRows = vault
+    ? buildVaultTreeRows(vault.folders, vault.notes)
+    : [];
 
   vaultRef.current = vault;
   activeNoteRef.current = activeNote;
@@ -249,7 +256,11 @@ function App() {
         return;
       }
 
-      const nextVault = { ...currentVault, notes: event.notes };
+      const nextVault = {
+        ...currentVault,
+        folders: event.folders,
+        notes: event.notes,
+      };
       vaultRef.current = nextVault;
       setVault((current) =>
         current?.vaultSession === event.vaultSession ? nextVault : current,
@@ -506,6 +517,38 @@ function App() {
       setNewNoteName("");
       setIsCreatingNote(false);
       await persistActiveNote(note.relativePath);
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateFolder() {
+    if (!vault || busy || newFolderName.length === 0) return;
+
+    setBusy(true);
+    setOperationError(null);
+    setWatcherNotice(null);
+    try {
+      const created = await createFolder("", newFolderName);
+      const currentVault = vaultRef.current;
+      if (currentVault) {
+        const folders = [
+          ...currentVault.folders.filter(
+            (entry) => entry.relativePath !== created.relativePath,
+          ),
+          created,
+        ].sort((left, right) =>
+          left.relativePath.localeCompare(right.relativePath),
+        );
+        const nextVault = { ...currentVault, folders };
+        vaultRef.current = nextVault;
+        setVault(nextVault);
+      }
+      setNewFolderName("");
+      setIsCreatingFolder(false);
+      setWatcherNotice(`Created folder ${created.relativePath}.`);
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -1042,12 +1085,31 @@ function App() {
               <div className="vault-heading">
                 <strong>{vault.name}</strong>
                 <div className="vault-heading-actions">
-                  <span>{vault.notes.length} notes</span>
+                  <span>
+                    {vault.notes.length} notes · {vault.folders.length} folders
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Create folder"
+                    title="Create folder"
+                    onClick={() => {
+                      setIsCreatingNote(false);
+                      setNewNoteName("");
+                      setIsCreatingFolder(true);
+                    }}
+                    disabled={busy || isCreatingFolder}
+                  >
+                    ▣
+                  </button>
                   <button
                     type="button"
                     aria-label="Create note"
                     title="Create note"
-                    onClick={() => setIsCreatingNote(true)}
+                    onClick={() => {
+                      setIsCreatingFolder(false);
+                      setNewFolderName("");
+                      setIsCreatingNote(true);
+                    }}
                     disabled={busy || isCreatingNote}
                   >
                     +
@@ -1090,31 +1152,80 @@ function App() {
                   </div>
                 </form>
               ) : null}
-              {vault.notes.length > 0 ? (
-                <div className="note-list">
-                  {vault.notes.map((note) => (
+              {isCreatingFolder ? (
+                <form
+                  className="new-note-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void handleCreateFolder();
+                  }}
+                >
+                  <label htmlFor="new-folder-name">New root folder name</label>
+                  <div>
+                    <input
+                      id="new-folder-name"
+                      value={newFolderName}
+                      onChange={(event) => setNewFolderName(event.target.value)}
+                      disabled={busy}
+                      autoFocus
+                    />
                     <button
-                      className={
-                        activeNote?.relativePath === note.relativePath
-                          ? "note-item active"
-                          : "note-item"
-                      }
-                      key={note.relativePath}
+                      type="submit"
+                      disabled={busy || newFolderName.length === 0}
+                    >
+                      Create
+                    </button>
+                    <button
                       type="button"
-                      title={note.relativePath}
-                      onClick={() => handleOpenNote(note.relativePath)}
+                      onClick={() => {
+                        setNewFolderName("");
+                        setIsCreatingFolder(false);
+                      }}
                       disabled={busy}
                     >
-                      <span aria-hidden="true">◇</span>
-                      <span>{note.title}</span>
+                      Cancel
                     </button>
-                  ))}
+                  </div>
+                </form>
+              ) : null}
+              {vaultTreeRows.length > 0 ? (
+                <div className="note-list">
+                  {vaultTreeRows.map((entry) =>
+                    entry.kind === "folder" ? (
+                      <div
+                        className="folder-item"
+                        key={`folder:${entry.relativePath}`}
+                        title={entry.relativePath}
+                        style={{ paddingLeft: `${8 + entry.depth * 14}px` }}
+                      >
+                        <span aria-hidden="true">▾</span>
+                        <span>{entry.label}</span>
+                      </div>
+                    ) : (
+                      <button
+                        className={
+                          activeNote?.relativePath === entry.relativePath
+                            ? "note-item active"
+                            : "note-item"
+                        }
+                        key={`note:${entry.relativePath}`}
+                        type="button"
+                        title={entry.relativePath}
+                        style={{ paddingLeft: `${8 + entry.depth * 14}px` }}
+                        onClick={() => handleOpenNote(entry.relativePath)}
+                        disabled={busy}
+                      >
+                        <span aria-hidden="true">◇</span>
+                        <span>{entry.label}</span>
+                      </button>
+                    ),
+                  )}
                 </div>
               ) : (
                 <div className="empty-vault">
                   <span className="folder-icon" aria-hidden="true">◇</span>
-                  <p>No Markdown notes</p>
-                  <small>Create a note with the + button above.</small>
+                  <p>Empty vault</p>
+                  <small>Create a note or folder with the buttons above.</small>
                 </div>
               )}
             </>

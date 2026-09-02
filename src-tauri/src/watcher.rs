@@ -12,7 +12,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 
-use super::{list_markdown_notes, read_markdown_note, CommandError, NoteEntry};
+use super::{list_vault_entries, read_markdown_note, CommandError, FolderEntry, NoteEntry};
 
 pub(crate) const VAULT_CHANGED_EVENT: &str = "vault://changed";
 const WATCH_DEBOUNCE_MS: u64 = 150;
@@ -20,6 +20,12 @@ const RESCAN_RETRY_DELAYS_MS: [u64; 3] = [0, 75, 250];
 
 pub(crate) type ExpectedWrites = Arc<Mutex<HashMap<String, String>>>;
 type VaultSnapshot = BTreeMap<String, String>;
+
+#[derive(Debug)]
+struct WatcherSnapshot {
+    note_hashes: VaultSnapshot,
+    folders: Vec<FolderEntry>,
+}
 
 #[derive(Clone, Copy)]
 enum WatchSignal {
@@ -92,6 +98,7 @@ struct VaultWatcherEvent {
     status: VaultWatcherStatus,
     error_code: Option<&'static str>,
     changes: Vec<VaultChange>,
+    folders: Vec<FolderEntry>,
     notes: Vec<NoteEntry>,
 }
 
@@ -173,7 +180,7 @@ fn watcher_worker(
     vault_session: u64,
     expected_writes: ExpectedWrites,
     write_lock: Arc<Mutex<()>>,
-    mut snapshot: VaultSnapshot,
+    mut snapshot: WatcherSnapshot,
     signal_rx: Receiver<WatchSignal>,
 ) {
     let mut revision = 0_u64;
@@ -203,6 +210,7 @@ fn watcher_worker(
                     status: VaultWatcherStatus::RescanRequired,
                     error_code: Some("watcher_state_unavailable"),
                     changes: Vec::new(),
+                    folders: Vec::new(),
                     notes: Vec::new(),
                 },
             );
@@ -218,6 +226,7 @@ fn watcher_worker(
                     status: VaultWatcherStatus::RescanRequired,
                     error_code: Some("watcher_rescan_required"),
                     changes: Vec::new(),
+                    folders: Vec::new(),
                     notes: Vec::new(),
                 },
             );
@@ -225,7 +234,11 @@ fn watcher_worker(
         };
 
         let changes = match expected_writes.lock() {
-            Ok(mut expected) => reconcile_snapshots(&snapshot, &next_snapshot, &mut expected),
+            Ok(mut expected) => reconcile_snapshots(
+                &snapshot.note_hashes,
+                &next_snapshot.note_hashes,
+                &mut expected,
+            ),
             Err(_) => {
                 let _ = app.emit(
                     VAULT_CHANGED_EVENT,
@@ -235,15 +248,18 @@ fn watcher_worker(
                         status: VaultWatcherStatus::RescanRequired,
                         error_code: Some("watcher_state_unavailable"),
                         changes: Vec::new(),
+                        folders: Vec::new(),
                         notes: Vec::new(),
                     },
                 );
                 return;
             }
         };
+        let folders_changed = snapshot.folders != next_snapshot.folders;
+        let next_folders = next_snapshot.folders.clone();
         snapshot = next_snapshot;
 
-        if changes.is_empty() && !backend_error {
+        if changes.is_empty() && !folders_changed && !backend_error {
             continue;
         }
         let _ = app.emit(
@@ -254,6 +270,7 @@ fn watcher_worker(
                 status: VaultWatcherStatus::Changed,
                 error_code: backend_error.then_some("watcher_backend_event_error"),
                 changes,
+                folders: next_folders,
                 notes,
             },
         );
@@ -262,7 +279,7 @@ fn watcher_worker(
 
 fn scan_snapshot_with_retries(
     root: &Path,
-) -> Result<(VaultSnapshot, Vec<NoteEntry>), CommandError> {
+) -> Result<(WatcherSnapshot, Vec<NoteEntry>), CommandError> {
     let mut last_error = None;
     for delay_ms in RESCAN_RETRY_DELAYS_MS {
         if delay_ms > 0 {
@@ -276,14 +293,20 @@ fn scan_snapshot_with_retries(
     Err(last_error.unwrap_or_else(CommandError::internal))
 }
 
-fn scan_snapshot(root: &Path) -> Result<(VaultSnapshot, Vec<NoteEntry>), CommandError> {
-    let notes = list_markdown_notes(root)?;
-    let mut snapshot = BTreeMap::new();
+fn scan_snapshot(root: &Path) -> Result<(WatcherSnapshot, Vec<NoteEntry>), CommandError> {
+    let (folders, notes) = list_vault_entries(root)?;
+    let mut note_hashes = BTreeMap::new();
     for note in &notes {
         let opened = read_markdown_note(root, &note.relative_path)?;
-        snapshot.insert(note.relative_path.clone(), opened.content_hash);
+        note_hashes.insert(note.relative_path.clone(), opened.content_hash);
     }
-    Ok((snapshot, notes))
+    Ok((
+        WatcherSnapshot {
+            note_hashes,
+            folders,
+        },
+        notes,
+    ))
 }
 
 fn reconcile_snapshots(
@@ -504,6 +527,9 @@ mod tests {
                 previous_relative_path: None,
                 content_hash: Some(hash_bytes(b"changed")),
             }],
+            folders: vec![FolderEntry {
+                relative_path: "Dự án".to_owned(),
+            }],
             notes: vec![NoteEntry {
                 relative_path: "Dự án/Ghi chú.md".to_owned(),
                 title: "Ghi chú".to_owned(),
@@ -514,6 +540,7 @@ mod tests {
         assert_eq!(serialized["vaultSession"], 3);
         assert_eq!(serialized["revision"], 7);
         assert_eq!(serialized["changes"][0]["relativePath"], "Dự án/Ghi chú.md");
+        assert_eq!(serialized["folders"][0]["relativePath"], "Dự án");
         assert!(serialized.get("root").is_none());
         assert!(serialized.get("content").is_none());
         assert!(serialized["changes"][0].get("content").is_none());
@@ -565,10 +592,10 @@ mod tests {
 
         let error = scan_snapshot(&root).expect_err("locked note should defer reconciliation");
         assert_eq!(error.code, "note_read_failed");
-        assert_eq!(before["locked.md"], hash_bytes(b"content"));
+        assert_eq!(before.note_hashes["locked.md"], hash_bytes(b"content"));
 
         drop(lock);
         let (after, _) = scan_snapshot(&root).expect("scan should recover after unlock");
-        assert_eq!(after, before);
+        assert_eq!(after.note_hashes, before.note_hashes);
     }
 }

@@ -19,8 +19,13 @@ export interface NoteEntry {
   title: string;
 }
 
+export interface FolderEntry {
+  relativePath: string;
+}
+
 export interface VaultSummary {
   name: string;
+  folders: FolderEntry[];
   notes: NoteEntry[];
   vaultSession: number;
 }
@@ -49,6 +54,7 @@ export interface VaultWatcherEvent {
   status: "changed" | "rescan_required";
   errorCode: string | null;
   changes: VaultChange[];
+  folders: FolderEntry[];
   notes: NoteEntry[];
 }
 
