@@ -25,6 +25,12 @@ export interface VaultSummary {
   vaultSession: number;
 }
 
+export interface RecentVault {
+  id: string;
+  name: string;
+  available: boolean;
+}
+
 export interface VaultChange {
   kind: "created" | "modified" | "deleted" | "renamed";
   source: "astian" | "external";
@@ -108,6 +114,18 @@ export function selectVault(): Promise<VaultSummary | null> {
 
 export function restoreLastVault(): Promise<VaultSummary | null> {
   return invoke<VaultSummary | null>("restore_last_vault");
+}
+
+export function listRecentVaults(): Promise<RecentVault[]> {
+  return invoke<RecentVault[]>("list_recent_vaults");
+}
+
+export function openRecentVault(recentVaultId: string): Promise<VaultSummary> {
+  return invoke<VaultSummary>("open_recent_vault", { recentVaultId });
+}
+
+export function forgetRecentVault(recentVaultId: string): Promise<void> {
+  return invoke<void>("forget_recent_vault", { recentVaultId });
 }
 
 export function reconcileVault(): Promise<void> {

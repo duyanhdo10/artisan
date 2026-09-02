@@ -27,9 +27,16 @@ Astian uses option 3:
 - Rust owns reading, validation and writing. The frontend can request
   `restore_last_vault`, but the response contains only the existing
   relative-path `VaultSummary`; absolute vault paths do not cross IPC.
+- The recent-vault picker receives only an opaque SHA-256 identity, the final
+  folder display name and an availability flag. Opening or forgetting an entry
+  sends the opaque identity back to Rust; the stored absolute path never
+  crosses the frontend IPC boundary.
 - Paths must be absolute and representable without lossy conversion. A stored
   path is canonicalized again before use because persisted paths are untrusted
   input on the next launch.
+- Recent entries are deduplicated by canonical filesystem identity when the
+  path is available, not by raw path text. This prevents Win32 (`C:\...`) and
+  verbatim (`\\?\C:\...`) forms of the same vault from becoming separate rows.
 - Writes use a sibling temporary file, flush, `sync_all`, atomic create or
   `ReplaceFileW`, and read-back verification. Updating an existing file checks
   its previously read bytes before every replace attempt; a changed revision is
@@ -38,6 +45,9 @@ Astian uses option 3:
   `settings_corrupt` or `settings_unsupported` codes. Missing settings mean no
   recent vault and are not an error. An unavailable recent vault uses
   `recent_vault_unavailable` and leaves manual vault selection available.
+- An unavailable entry remains visible until the user explicitly forgets it.
+  `recent_vault_not_found` covers malformed, stale and already-forgotten opaque
+  identities without revealing whether any guessed filesystem path exists.
 - Other settings failures use stable `settings_*` error codes with redacted
   messages. Paths are not logged or embedded in errors.
 

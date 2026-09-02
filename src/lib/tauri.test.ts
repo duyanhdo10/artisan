@@ -6,9 +6,12 @@ import {
   createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
+  forgetRecentVault,
   listenVaultChanges,
+  listRecentVaults,
   listRecoveryDrafts,
   normalizeCommandError,
+  openRecentVault,
   readRecoveryDraft,
   reconcileVault,
   restoreLastVault,
@@ -134,6 +137,33 @@ describe("vault watcher IPC", () => {
 
     expect(listen).toHaveBeenCalledWith("vault://changed", expect.any(Function));
     expect(handler).toHaveBeenCalledWith(payload);
+  });
+});
+
+describe("recent vault IPC", () => {
+  it("lists summaries without sending a filesystem path", async () => {
+    const recent = [
+      { id: "a".repeat(64), name: "Kho ghi chú", available: true },
+    ];
+    vi.mocked(invoke).mockResolvedValue(recent);
+
+    await expect(listRecentVaults()).resolves.toEqual(recent);
+    expect(invoke).toHaveBeenCalledWith("list_recent_vaults");
+  });
+
+  it("opens and forgets a recent vault only by opaque id", async () => {
+    const id = "a".repeat(64);
+    const summary = { name: "Kho ghi chú", notes: [], vaultSession: 4 };
+    vi.mocked(invoke).mockResolvedValueOnce(summary).mockResolvedValueOnce(undefined);
+
+    await expect(openRecentVault(id)).resolves.toEqual(summary);
+    await expect(forgetRecentVault(id)).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenNthCalledWith(1, "open_recent_vault", {
+      recentVaultId: id,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "forget_recent_vault", {
+      recentVaultId: id,
+    });
   });
 });
 

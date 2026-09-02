@@ -84,7 +84,46 @@ small,
 }
 
 .primary-action:disabled { cursor: not-allowed; opacity: 0.55; }
-.nav-sections { display: grid; gap: 3px; margin-top: 20px; }
+.nav-sections { display: grid; gap: 3px; margin-top: 16px; }
+
+.recent-vaults {
+  display: grid;
+  gap: 4px;
+  max-height: 150px;
+  margin-top: 14px;
+  overflow: auto;
+}
+.recent-vaults h2 {
+  margin: 0 4px 2px;
+  color: #94a7a8;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.recent-vault {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  gap: 3px;
+}
+.recent-vault button {
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  color: #94a7a8;
+  background: transparent;
+}
+.recent-vault button:hover:not(:disabled) { color: #d7e3e3; background: #182528; }
+.recent-vault button:disabled { cursor: not-allowed; opacity: 0.55; }
+.recent-vault-open {
+  display: grid;
+  gap: 1px;
+  padding: 5px 7px;
+  text-align: left;
+}
+.recent-vault-open span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-vault-open small { font-size: 9px; }
+.recent-vault-forget { display: grid; place-items: center; padding: 0; font-size: 15px; }
 
 .nav-item {
   display: flex;

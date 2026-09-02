@@ -192,6 +192,50 @@ async fn restore_last_vault(
     activate_vault(&app, &state, root, false).map(Some)
 }
 
+#[tauri::command]
+fn list_recent_vaults(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VaultState>,
+) -> Result<Vec<settings::RecentVault>, CommandError> {
+    let app_local_data_root = settings_local_data_root(&app)?;
+    let _settings_guard = state
+        .settings_lock
+        .lock()
+        .map_err(|_| CommandError::internal())?;
+    settings::recent_vaults(&app_local_data_root)
+}
+
+#[tauri::command]
+fn open_recent_vault(
+    app: tauri::AppHandle,
+    recent_vault_id: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<VaultSummary, CommandError> {
+    let app_local_data_root = settings_local_data_root(&app)?;
+    let root = {
+        let _settings_guard = state
+            .settings_lock
+            .lock()
+            .map_err(|_| CommandError::internal())?;
+        settings::resolve_recent_vault(&app_local_data_root, &recent_vault_id)?
+    };
+    activate_vault(&app, &state, root, true)
+}
+
+#[tauri::command]
+fn forget_recent_vault(
+    app: tauri::AppHandle,
+    recent_vault_id: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<(), CommandError> {
+    let app_local_data_root = settings_local_data_root(&app)?;
+    let _settings_guard = state
+        .settings_lock
+        .lock()
+        .map_err(|_| CommandError::internal())?;
+    settings::forget_recent_vault(&app_local_data_root, &recent_vault_id)
+}
+
 fn activate_vault(
     app: &tauri::AppHandle,
     state: &VaultState,
@@ -1258,6 +1302,9 @@ pub fn run() {
             get_runtime_info,
             select_vault,
             restore_last_vault,
+            list_recent_vaults,
+            open_recent_vault,
+            forget_recent_vault,
             reconcile_vault,
             open_note,
             create_note,

@@ -29,11 +29,14 @@ import {
   createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
+  forgetRecentVault,
   getRuntimeInfo,
   listenVaultChanges,
+  listRecentVaults,
   listRecoveryDrafts,
   normalizeCommandError,
   openNote,
+  openRecentVault,
   readRecoveryDraft,
   reconcileVault,
   restoreLastVault,
@@ -42,6 +45,7 @@ import {
   selectVault,
   writeRecoveryDraft,
   type OpenedNote,
+  type RecentVault,
   type RecoveryDraftSummary,
   type RuntimeInfo,
   type UnavailableRecoveryDraft,
@@ -64,6 +68,7 @@ function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [vault, setVault] = useState<VaultSummary | null>(null);
+  const [recentVaults, setRecentVaults] = useState<RecentVault[]>([]);
   const [activeNote, setActiveNote] = useState<OpenedNote | null>(null);
   const [draft, setDraft] = useState("");
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -134,6 +139,12 @@ function App() {
         } catch (error: unknown) {
           if (active) setOperationError(normalizeCommandError(error).message);
         } finally {
+          try {
+            const recent = await listRecentVaults();
+            if (active) setRecentVaults(recent);
+          } catch (error: unknown) {
+            if (active) setOperationError(normalizeCommandError(error).message);
+          }
           if (active) setBusy(false);
         }
       })
@@ -340,7 +351,48 @@ function App() {
       const selectedVault = await selectVault();
       if (selectedVault) {
         await applyVault(selectedVault);
+        setRecentVaults(await listRecentVaults());
       }
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleOpenRecentVault(recentVaultId: string) {
+    if (busy) return;
+    if (isDirty) {
+      const saved = await handleSave();
+      if (!saved) return;
+    }
+
+    setBusy(true);
+    setOperationError(null);
+    setWatcherNotice(null);
+    try {
+      const selectedVault = await openRecentVault(recentVaultId);
+      await applyVault(selectedVault);
+      setRecentVaults(await listRecentVaults());
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+      try {
+        setRecentVaults(await listRecentVaults());
+      } catch {
+        // Preserve the actionable open error when settings cannot be re-listed.
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleForgetRecentVault(recentVaultId: string) {
+    if (busy) return;
+    setBusy(true);
+    setOperationError(null);
+    try {
+      await forgetRecentVault(recentVaultId);
+      setRecentVaults(await listRecentVaults());
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -905,6 +957,36 @@ function App() {
         >
           {busy ? "Working…" : vault ? "Change vault" : "Open vault"}
         </button>
+
+        {recentVaults.length > 0 ? (
+          <section className="recent-vaults" aria-label="Recent vaults">
+            <h2>Recent vaults</h2>
+            {recentVaults.map((recent) => (
+              <div className="recent-vault" key={recent.id}>
+                <button
+                  className="recent-vault-open"
+                  type="button"
+                  title={recent.available ? `Open ${recent.name}` : `${recent.name} is unavailable`}
+                  onClick={() => void handleOpenRecentVault(recent.id)}
+                  disabled={busy || !recent.available}
+                >
+                  <span>{recent.name}</span>
+                  {!recent.available ? <small>Unavailable</small> : null}
+                </button>
+                <button
+                  className="recent-vault-forget"
+                  type="button"
+                  aria-label={`Forget ${recent.name}`}
+                  title={`Forget ${recent.name}`}
+                  onClick={() => void handleForgetRecentVault(recent.id)}
+                  disabled={busy}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </section>
+        ) : null}
 
         <nav className="nav-sections" aria-label="Vault tools">
           <button className="nav-item active" type="button">

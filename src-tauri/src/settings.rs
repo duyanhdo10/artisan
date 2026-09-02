@@ -9,7 +9,7 @@ use std::{
 use tempfile::Builder as TempFileBuilder;
 
 use super::{
-    is_retryable_replace_error, platform_replace_file, CleanupPath, CommandError,
+    hash_bytes, is_retryable_replace_error, platform_replace_file, CleanupPath, CommandError,
     ReplacementReceipt, REPLACE_RETRY_DELAYS_MS,
 };
 
@@ -24,6 +24,14 @@ struct StoredSettings {
     recent_vaults: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecentVault {
+    id: String,
+    name: String,
+    available: bool,
+}
+
 impl StoredSettings {
     fn empty() -> Self {
         Self {
@@ -36,6 +44,91 @@ impl StoredSettings {
 pub(crate) fn last_vault(app_local_data_root: &Path) -> Result<Option<PathBuf>, CommandError> {
     let (settings, _) = read_settings(app_local_data_root)?;
     Ok(settings.recent_vaults.first().map(PathBuf::from))
+}
+
+pub(crate) fn recent_vaults(app_local_data_root: &Path) -> Result<Vec<RecentVault>, CommandError> {
+    let (settings, _) = read_settings(app_local_data_root)?;
+    Ok(settings
+        .recent_vaults
+        .iter()
+        .map(|stored_path| {
+            let path = Path::new(stored_path);
+            RecentVault {
+                id: recent_vault_id(stored_path),
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("Vault")
+                    .to_owned(),
+                available: fs::canonicalize(path).is_ok_and(|root| root.is_dir()),
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn resolve_recent_vault(
+    app_local_data_root: &Path,
+    id: &str,
+) -> Result<PathBuf, CommandError> {
+    validate_recent_vault_id(id)?;
+    let (settings, _) = read_settings(app_local_data_root)?;
+    let stored_path = settings
+        .recent_vaults
+        .iter()
+        .find(|path| recent_vault_id(path) == id)
+        .ok_or_else(recent_vault_not_found)?;
+    let root = fs::canonicalize(stored_path).map_err(|_| recent_vault_unavailable())?;
+    if !root.is_dir() {
+        return Err(recent_vault_unavailable());
+    }
+    Ok(root)
+}
+
+pub(crate) fn forget_recent_vault(
+    app_local_data_root: &Path,
+    id: &str,
+) -> Result<(), CommandError> {
+    validate_recent_vault_id(id)?;
+    let (mut settings, expected_bytes) = read_settings(app_local_data_root)?;
+    let original_len = settings.recent_vaults.len();
+    settings
+        .recent_vaults
+        .retain(|path| recent_vault_id(path) != id);
+    if settings.recent_vaults.len() == original_len {
+        return Err(recent_vault_not_found());
+    }
+    write_settings(
+        app_local_data_root,
+        &settings,
+        expected_bytes.as_deref(),
+        platform_replace_file,
+    )
+}
+
+fn recent_vault_id(stored_path: &str) -> String {
+    hash_bytes(stored_path.as_bytes())
+}
+
+fn validate_recent_vault_id(id: &str) -> Result<(), CommandError> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(recent_vault_not_found());
+    }
+    Ok(())
+}
+
+fn recent_vault_not_found() -> CommandError {
+    CommandError::new(
+        "recent_vault_not_found",
+        "That recent vault is no longer in Astian settings.",
+    )
+}
+
+fn recent_vault_unavailable() -> CommandError {
+    CommandError::new(
+        "recent_vault_unavailable",
+        "That recent vault is unavailable. Reconnect it or forget the entry.",
+    )
 }
 
 pub(crate) fn remember_vault(
@@ -71,16 +164,15 @@ where
     })?;
 
     let (mut settings, expected_bytes) = read_settings(app_local_data_root)?;
-    if settings
+    let previous_recent_vaults = settings.recent_vaults.clone();
+    settings
         .recent_vaults
-        .first()
-        .is_some_and(|path| path == vault_path)
-    {
-        return Ok(());
-    }
-    settings.recent_vaults.retain(|path| path != vault_path);
+        .retain(|path| !stored_path_matches(path, canonical_vault_root));
     settings.recent_vaults.insert(0, vault_path.to_owned());
     settings.recent_vaults.truncate(MAX_RECENT_VAULTS);
+    if settings.recent_vaults == previous_recent_vaults {
+        return Ok(());
+    }
 
     write_settings(
         app_local_data_root,
@@ -88,6 +180,12 @@ where
         expected_bytes.as_deref(),
         replace_file,
     )
+}
+
+fn stored_path_matches(stored_path: &str, canonical_vault_root: &Path) -> bool {
+    Path::new(stored_path) == canonical_vault_root
+        || fs::canonicalize(stored_path)
+            .is_ok_and(|stored_root| stored_root == canonical_vault_root)
 }
 
 fn read_settings(
@@ -336,6 +434,88 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remember_deduplicates_win32_and_verbatim_forms_of_the_same_vault() {
+        let temp = tempfile::tempdir().expect("temporary root should be created");
+        let app_data = temp.path().join("app-data");
+        let vault = canonical_directory(temp.path(), "Same vault");
+        let canonical = vault.to_str().expect("canonical path should be Unicode");
+        let win32_form = canonical.strip_prefix(r"\\?\").unwrap_or(canonical);
+        assert_ne!(
+            win32_form, canonical,
+            "fixture should expose both path forms"
+        );
+        let settings = StoredSettings {
+            schema_version: SETTINGS_SCHEMA_VERSION,
+            recent_vaults: vec![win32_form.to_owned(), canonical.to_owned()],
+        };
+        write_settings(&app_data, &settings, None, platform_replace_file)
+            .expect("legacy-form settings should write");
+
+        remember_vault(&app_data, &vault).expect("vault should deduplicate");
+
+        let (stored, _) = read_settings(&app_data).expect("settings should read");
+        assert_eq!(stored.recent_vaults, vec![canonical]);
+        assert!(internal_artifacts(&app_data).is_empty());
+    }
+
+    #[test]
+    fn recent_vault_descriptors_use_opaque_ids_without_exposing_paths() {
+        let temp = tempfile::tempdir().expect("temporary root should be created");
+        let app_data = temp.path().join("app-data");
+        let vault = canonical_directory(temp.path(), "Kho ghi chú");
+        remember_vault(&app_data, &vault).expect("vault should be remembered");
+
+        let recent = recent_vaults(&app_data).expect("recent vaults should list");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id.len(), 64);
+        assert_eq!(recent[0].name, "Kho ghi chú");
+        assert!(recent[0].available);
+        assert_eq!(
+            resolve_recent_vault(&app_data, &recent[0].id).expect("opaque id should resolve"),
+            vault
+        );
+
+        let serialized = serde_json::to_value(&recent[0]).expect("descriptor should serialize");
+        assert_eq!(serialized["name"], "Kho ghi chú");
+        assert!(serialized.get("path").is_none());
+        assert!(serialized.get("relativePath").is_none());
+    }
+
+    #[test]
+    fn unavailable_recent_vault_can_be_forgotten_by_opaque_id() {
+        let temp = tempfile::tempdir().expect("temporary root should be created");
+        let app_data = temp.path().join("app-data");
+        let vault = canonical_directory(temp.path(), "Moved vault");
+        remember_vault(&app_data, &vault).expect("vault should be remembered");
+        fs::remove_dir(&vault).expect("empty vault should be removed");
+
+        let recent = recent_vaults(&app_data).expect("recent vaults should list");
+        assert_eq!(recent.len(), 1);
+        assert!(!recent[0].available);
+        let unavailable = resolve_recent_vault(&app_data, &recent[0].id)
+            .expect_err("missing vault should not open");
+        assert_eq!(unavailable.code, "recent_vault_unavailable");
+
+        forget_recent_vault(&app_data, &recent[0].id).expect("entry should be forgotten");
+        assert!(recent_vaults(&app_data)
+            .expect("recent vaults should relist")
+            .is_empty());
+        let missing = forget_recent_vault(&app_data, &recent[0].id)
+            .expect_err("forgotten id should remain invalid");
+        assert_eq!(missing.code, "recent_vault_not_found");
+        assert!(internal_artifacts(&app_data).is_empty());
+    }
+
+    #[test]
+    fn malformed_recent_vault_id_is_rejected_before_lookup() {
+        let temp = tempfile::tempdir().expect("temporary root should be created");
+        let error = resolve_recent_vault(temp.path(), "../vault")
+            .expect_err("malformed opaque id should fail");
+        assert_eq!(error.code, "recent_vault_not_found");
     }
 
     #[test]
