@@ -137,6 +137,45 @@ small,
 
 .vault-heading strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; }
 .vault-heading span { flex: none; color: #94a7a8; font-size: 10px; }
+.vault-heading-actions { display: flex; align-items: center; gap: 6px; }
+.vault-heading-actions button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid #345256;
+  border-radius: 5px;
+  color: #b9d8d7;
+  background: #1c2c2f;
+}
+.vault-heading-actions button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+.new-note-form {
+  display: grid;
+  gap: 5px;
+  padding: 2px 8px 8px;
+  color: #94a7a8;
+  font-size: 10px;
+}
+.new-note-form > div { display: flex; gap: 5px; }
+.new-note-form input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #345256;
+  border-radius: 5px;
+  padding: 5px 7px;
+  color: #d7e3e3;
+  background: #0b1113;
+}
+.new-note-form button {
+  border: 1px solid #345256;
+  border-radius: 5px;
+  padding: 4px 6px;
+  color: #b9d8d7;
+  background: #1c2c2f;
+  font-size: 9px;
+}
+.new-note-form button:disabled { cursor: not-allowed; opacity: 0.45; }
 .note-list { overflow: auto; padding: 2px 0; }
 
 .note-item {

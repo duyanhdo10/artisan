@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearRecoveryDraft,
+  createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
   listenVaultChanges,
@@ -72,6 +73,25 @@ describe("saveNote", () => {
       relativePath: "notes/Astian.md",
       content: "# Astian\n",
       expectedHash: "a".repeat(64),
+    });
+  });
+});
+
+describe("createNote", () => {
+  it("forwards only a parent-relative path and one filename segment", async () => {
+    const opened = {
+      relativePath: "Kế hoạch.md",
+      content: "",
+      contentHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      lineEnding: "none" as const,
+      hasUtf8Bom: false,
+    };
+    vi.mocked(invoke).mockResolvedValue(opened);
+
+    await expect(createNote("", "Kế hoạch")).resolves.toEqual(opened);
+    expect(invoke).toHaveBeenCalledWith("create_note", {
+      parentRelativePath: "",
+      fileName: "Kế hoạch",
     });
   });
 });

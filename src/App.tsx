@@ -26,6 +26,7 @@ import {
 import { decideActiveNoteWatcherAction } from "./editor/watcherPolicy";
 import {
   clearRecoveryDraft,
+  createNote,
   deleteUnavailableRecoveryDraft,
   exportUnavailableRecoveryDraft,
   getRuntimeInfo,
@@ -68,6 +69,8 @@ function App() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [watcherNotice, setWatcherNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [isCreatingNote, setIsCreatingNote] = useState(false);
+  const [newNoteName, setNewNoteName] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
   const [recoveryDrafts, setRecoveryDrafts] = useState<RecoveryDraftSummary[]>([]);
@@ -153,6 +156,8 @@ function App() {
       revision: 0,
     };
     setVault(nextVault);
+    setIsCreatingNote(false);
+    setNewNoteName("");
     setActiveNote(null);
     setDraft("");
     setSaveState("idle");
@@ -371,6 +376,54 @@ function App() {
       setRecoveryState("idle");
       setEditorRevision(0);
       expectedRecoveryHashRef.current = null;
+    } catch (error: unknown) {
+      setOperationError(normalizeCommandError(error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateNote() {
+    if (!vault || busy || newNoteName.length === 0) return;
+    if (isDirty) {
+      const saved = await handleSave();
+      if (!saved) return;
+    }
+
+    setBusy(true);
+    setOperationError(null);
+    setWatcherNotice(null);
+    try {
+      const note = await createNote("", newNoteName);
+      const pathSegments = note.relativePath.split("/");
+      const title =
+        pathSegments[pathSegments.length - 1]?.replace(/\.md$/i, "") ??
+        note.relativePath;
+      const currentVault = vaultRef.current;
+      if (currentVault) {
+        const notes = [
+          ...currentVault.notes.filter(
+            (entry) => entry.relativePath !== note.relativePath,
+          ),
+          { relativePath: note.relativePath, title },
+        ].sort((left, right) =>
+          left.relativePath.localeCompare(right.relativePath),
+        );
+        const nextVault = { ...currentVault, notes };
+        vaultRef.current = nextVault;
+        setVault(nextVault);
+      }
+      activeNoteRef.current = note;
+      draftRef.current = note.content;
+      editorRevisionRef.current = 0;
+      setActiveNote(note);
+      setDraft(note.content);
+      setEditorRevision(0);
+      setSaveState("idle");
+      setRecoveryState("idle");
+      expectedRecoveryHashRef.current = null;
+      setNewNoteName("");
+      setIsCreatingNote(false);
     } catch (error: unknown) {
       setOperationError(normalizeCommandError(error).message);
     } finally {
@@ -873,8 +926,55 @@ function App() {
             <>
               <div className="vault-heading">
                 <strong>{vault.name}</strong>
-                <span>{vault.notes.length} notes</span>
+                <div className="vault-heading-actions">
+                  <span>{vault.notes.length} notes</span>
+                  <button
+                    type="button"
+                    aria-label="Create note"
+                    title="Create note"
+                    onClick={() => setIsCreatingNote(true)}
+                    disabled={busy || isCreatingNote}
+                  >
+                    +
+                  </button>
+                </div>
               </div>
+              {isCreatingNote ? (
+                <form
+                  className="new-note-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void handleCreateNote();
+                  }}
+                >
+                  <label htmlFor="new-note-name">New note name</label>
+                  <div>
+                    <input
+                      id="new-note-name"
+                      value={newNoteName}
+                      onChange={(event) => setNewNoteName(event.target.value)}
+                      disabled={busy}
+                      autoFocus
+                    />
+                    <button
+                      type="submit"
+                      disabled={busy || newNoteName.length === 0}
+                    >
+                      Create
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewNoteName("");
+                        setIsCreatingNote(false);
+                      }}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : null}
               {vault.notes.length > 0 ? (
                 <div className="note-list">
                   {vault.notes.map((note) => (
@@ -899,7 +999,7 @@ function App() {
                 <div className="empty-vault">
                   <span className="folder-icon" aria-hidden="true">◇</span>
                   <p>No Markdown notes</p>
-                  <small>Add a `.md` file to this folder and reopen the vault.</small>
+                  <small>Create a note with the + button above.</small>
                 </div>
               )}
             </>

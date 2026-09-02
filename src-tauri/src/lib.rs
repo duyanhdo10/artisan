@@ -2,6 +2,7 @@ pub mod git_status;
 mod recovery;
 pub mod search_index;
 mod settings;
+mod vault_name;
 mod watcher;
 
 use recovery::{RecoveryDraft, RecoveryDraftListItem, RecoveryDraftSummary};
@@ -296,6 +297,39 @@ async fn save_note(
     })
     .await
     .map_err(|_| CommandError::internal())?
+}
+
+#[tauri::command]
+async fn create_note(
+    parent_relative_path: String,
+    file_name: String,
+    state: tauri::State<'_, VaultState>,
+) -> Result<OpenedNote, CommandError> {
+    let root = current_vault_root(&state)?;
+    let write_lock = Arc::clone(&state.write_lock);
+    let expected_writes = current_expected_writes(&state)?;
+
+    let created = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = write_lock.lock().map_err(|_| CommandError::internal())?;
+        let created = vault_name::create_note(&root, &parent_relative_path, &file_name)?;
+        // The file is already verified at this point. A poisoned watcher map
+        // must not turn a successful no-clobber create into a reported failure.
+        let _ = watcher::record_expected_write(
+            &expected_writes,
+            &created.relative_path,
+            &created.content_hash,
+        );
+        Ok(created)
+    })
+    .await
+    .map_err(|_| CommandError::internal())??;
+
+    if let Ok(watcher) = state.watcher.lock() {
+        if let Some(watcher) = watcher.as_ref() {
+            let _ = watcher.request_reconcile();
+        }
+    }
+    Ok(created)
 }
 
 #[tauri::command]
@@ -1226,6 +1260,7 @@ pub fn run() {
             restore_last_vault,
             reconcile_vault,
             open_note,
+            create_note,
             save_note,
             write_recovery_draft,
             list_recovery_drafts,

@@ -126,6 +126,13 @@ export function openNote(relativePath: string): Promise<OpenedNote> {
   return invoke<OpenedNote>("open_note", { relativePath });
 }
 
+export function createNote(
+  parentRelativePath: string,
+  fileName: string,
+): Promise<OpenedNote> {
+  return invoke<OpenedNote>("create_note", { parentRelativePath, fileName });
+}
+
 export function saveNote(
   relativePath: string,
   content: string,
